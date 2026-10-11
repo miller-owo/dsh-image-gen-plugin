@@ -1,9 +1,17 @@
 {
   "name": "dsh-image-gen-plugin",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Image generation tool and settings page for DeepSeek Harness, talking to any OpenAI-compatible /images/generations endpoint.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miller-owo/dsh-image-gen-plugin.git"
+  },
+  "homepage": "https://github.com/miller-owo/dsh-image-gen-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/miller-owo/dsh-image-gen-plugin/issues"
+  },
   "icon": "./icon.svg",
   "main": "./index.js",
   "meta": {
