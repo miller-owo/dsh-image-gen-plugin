@@ -1,6 +1,6 @@
 {
   "name": "dsh-image-gen-plugin",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Image generation tool and settings page for DeepSeek Harness, talking to any OpenAI-compatible /images/generations endpoint.",
   "license": "MIT",

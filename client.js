@@ -44,6 +44,7 @@ window.__ModuleLoader__.load({
     ];
     const FIELDS = [
       'apiUrl',
+      'secret',
       'model',
       'count',
       'outputFormat',
@@ -70,8 +71,9 @@ window.__ModuleLoader__.load({
       labelApiUrl: 'API URL',
       hintApiUrl: 'Base URL of an OpenAI-compatible API. /images/generations is appended to it.',
       labelApiKey: 'API key',
-      hintApiKeySet: 'A key is stored under a neutral field name in the profile config, and the settings API never sends it back. Leave this empty to keep it; type a new one to replace it.',
-      hintApiKeyEmpty: 'Sent as the Bearer token. It is stored in the profile configuration under a neutral field name and never leaves this machine.',
+      hintApiKey: 'Sent as the Bearer token. Stored in this profile\'s configuration and never leaves this machine.',
+      showKey: 'Show',
+      hideKey: 'Hide',
       sectionConnection: 'Connection',
       sectionMaintenance: 'Records',
       clearButton: 'Clear image records',
@@ -157,8 +159,9 @@ window.__ModuleLoader__.load({
       labelApiUrl: 'API 地址',
       hintApiUrl: '兼容 OpenAI 的接口基地址，会在后面拼接 /images/generations。',
       labelApiKey: 'API 密钥',
-      hintApiKeySet: '密钥已保存，配置里用的是中性字段名，设置接口不会把它回传。留空表示不改动；输入新值即可替换。',
-      hintApiKeyEmpty: '作为 Bearer 令牌发送。保存在本机配置里，字段名是中性的，不会外传。',
+      hintApiKey: '作为 Bearer 令牌发送。保存在本机这份 profile 配置里，不会外传。',
+      showKey: '显示',
+      hideKey: '隐藏',
       sectionConnection: '连接',
       sectionMaintenance: '记录',
       clearButton: '清除图片记录',
@@ -436,6 +439,7 @@ window.__ModuleLoader__.load({
     function normalize(raw) {
       return {
         apiUrl: typeof raw?.apiUrl === 'string' ? raw.apiUrl : '',
+        secret: typeof raw?.secret === 'string' ? raw.secret : '',
         model: typeof raw?.model === 'string' ? raw.model : '',
         count: asNumber(raw?.count, 1),
         outputFormat: typeof raw?.outputFormat === 'string' ? raw.outputFormat : 'png',
@@ -467,7 +471,7 @@ window.__ModuleLoader__.load({
         const t = useLanguage();
         const [state, setState] = useState({ status: 'loading' });
         const [form, setForm] = useState(null);
-        const [keyDraft, setKeyDraft] = useState(null);
+        const [keyVisible, setKeyVisible] = useState(false);
         const [busy, setBusy] = useState(false);
         const [message, setMessage] = useState(null);
 
@@ -523,12 +527,11 @@ window.__ModuleLoader__.load({
           setBusy(true);
           setMessage(null);
           try {
-            const ops = FIELDS.filter((field) => field !== 'secret').map((field) => ({
+            const ops = FIELDS.map((field) => ({
               op: 'set',
               path: [field],
               value: form[field],
             }));
-            if (keyDraft) ops.push({ op: 'set', path: ['secret'], value: keyDraft });
             const written = unwrap(await api.mutate(state.ns, ops, state.revision));
             if (!written.ok) {
               setMessage({ kind: 'error', text: written.message.includes('conflict') ? t('conflict') : written.message });
@@ -542,7 +545,6 @@ window.__ModuleLoader__.load({
               revision: view?.revision ?? current.revision,
               secrets: Array.isArray(view?.secrets) ? view.secrets : current.secrets,
             }));
-            setKeyDraft(null);
             setMessage({ kind: 'ok', text: t('saved') });
           } catch (error) {
             const text = String(error?.message ?? error);
@@ -588,9 +590,6 @@ window.__ModuleLoader__.load({
           return h('div', { style: { fontSize: 13, color: TOKENS.danger } }, state.message);
         }
 
-        const keyIsSet = state.secrets.some(
-          (secret) => Array.isArray(secret.path) && secret.path[0] === 'secret' && secret.set,
-        );
         const compressionLocked = form.outputFormat === 'png';
 
         return h(
@@ -625,13 +624,37 @@ window.__ModuleLoader__.load({
           ),
           h(
             Row,
-            { label: t('labelApiKey'), hint: keyIsSet ? t('hintApiKeySet') : t('hintApiKeyEmpty') },
-            h(TextField, {
-              type: 'password',
-              value: keyDraft ?? '',
-              placeholder: keyIsSet ? '••••••••' : 'sk-...',
-              onChange: setKeyDraft,
-            }),
+            { label: t('labelApiKey'), hint: t('hintApiKey') },
+            h(
+              'div',
+              { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+              h(TextField, {
+                // The value itself is shown, so the key can be read back and copied. It starts
+                // masked only against a shoulder, and the toggle reveals it.
+                type: keyVisible ? 'text' : 'password',
+                value: form.secret ?? '',
+                placeholder: 'sk-...',
+                onChange: patch('secret'),
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  onClick: () => setKeyVisible((current) => !current),
+                  style: {
+                    flex: '0 0 auto',
+                    padding: '6px 10px',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    borderRadius: 6,
+                    border: `1px solid ${TOKENS.border}`,
+                    background: 'transparent',
+                    color: TOKENS.muted,
+                  },
+                },
+                keyVisible ? t('hideKey') : t('showKey'),
+              ),
+            ),
           ),
 
           h('div', { style: { fontSize: 13, fontWeight: 600, color: TOKENS.text, margin: '20px 0 10px' } }, t('sectionDefaults')),

@@ -134,6 +134,9 @@ const describeValue = {
       revision: 7,
       value: {
         apiUrl: 'https://api.example/v1',
+        // The key arrives as an ordinary field now. It used to be withheld by role('secret'),
+        // which is what left the settings page unable to show or copy it.
+        secret: 'sk-test',
         model: 'gpt-image-2',
         quality: 'high',
         count: 2,
@@ -145,7 +148,6 @@ const describeValue = {
         outputDir: 'D:\\shots',
         requestTimeoutSec: 300,
       },
-      secrets: [{ path: ['secret'], set: true }],
     },
   ],
 };
@@ -258,6 +260,16 @@ const settle = async (rounds = 4) => {
   return tree;
 };
 
+const findAllByType = (type, extra = {}) => {
+  const found = [];
+  walk(tree, (node) => {
+    if (node.type !== type) return;
+    for (const [key, value] of Object.entries(extra)) if (node.props?.[key] !== value) return;
+    found.push(node);
+  });
+  return found;
+};
+
 const findByType = (type, extra = {}) => {
   let found = null;
   walk(tree, (node) => {
@@ -317,20 +329,29 @@ await check('the form renders the stored values once describe resolves', async (
   if (!text.includes('D:\\\\shots')) throw new Error('outputDir missing');
 });
 
-await check('a stored key renders as a set-state password field', () => {
+await check('the stored key is shown, masked only until revealed', () => {
   const password = findByType('input', { type: 'password' });
-  if (!password) throw new Error('no password field');
-  if (password.props.value !== '') throw new Error(`value was "${password.props.value}"`);
-  if (password.props.placeholder !== '••••••••') throw new Error(password.props.placeholder);
-});
-
-await check('the credential value never appears in what the settings page receives', () => {
-
-  const rendered = JSON.stringify(tree);
-  if (rendered.includes('sk-test')) throw new Error('a stored credential crossed into the page');
-  const secretEntry = describeValue.namespaces[0].secrets.find((row) => row.path[0] === 'secret');
-  if (!secretEntry || secretEntry.set !== true) throw new Error('the sidecar does not report the credential as set');
-  if ('secret' in describeValue.namespaces[0].value) throw new Error('the value rode along in the namespace value');
+  if (!password) throw new Error('no key field');
+  // The value itself is present, so the key can be read back and copied, and it is masked
+  // by the input type rather than withheld from the page.
+  if (password.props.value !== 'sk-test') throw new Error(`value was "${password.props.value}"`);
+  // A show control must exist, and turning it on must switch THIS field to plain text. The
+  // lookup is by value, because a bare type:'text' also matches every ordinary input.
+  const toggle = findByText('显示');
+  if (!toggle) throw new Error('no reveal control');
+  toggle.props.onClick();
+  tree = rerender();
+  const revealed = findAllByType('input').find((node) => node.props.value === 'sk-test' && node.props.type === 'text');
+  if (!revealed) {
+    const seen = findAllByType('input')
+      .filter((node) => String(node.props.value ?? '').startsWith('sk-'))
+      .map((node) => `${node.props.type}:${node.props.value}`);
+    throw new Error(`the key could not be revealed (${seen.join(', ') || 'no sk- field at all'})`);
+  }
+  const hide = findByText('隐藏');
+  if (!hide) throw new Error('no hide control once revealed');
+  hide.props.onClick();
+  tree = rerender();
 });
 
 await check('png locks the compression slider', () => {
@@ -339,7 +360,7 @@ await check('png locks the compression slider', () => {
   if (slider.props.disabled !== true) throw new Error('slider stayed enabled');
 });
 
-await check('saving without a new key never restates the secret', async () => {
+await check('saving restates every field, the key included', async () => {
   mutations.length = 0;
   const save = findByText('保存');
   if (!save) throw new Error('no save button');
@@ -348,8 +369,12 @@ await check('saving without a new key never restates the secret', async () => {
   const { ns, ops, revision } = mutations[0];
   if (ns !== 'dsh-image-generation') throw new Error(ns);
   if (revision !== 7) throw new Error(`revision ${revision}`);
-  if (ops.some((op) => op.path[0] === 'apiKey')) throw new Error('apiKey was restated');
   const fields = ops.map((op) => op.path[0]);
+  // The key is written like any other field now. It was previously withheld, which is what
+  // made a saved key impossible to read back from this page.
+  if (!fields.includes('secret')) throw new Error('the key was withheld from the write');
+  const secret = ops.find((op) => op.path[0] === 'secret');
+  if (secret.value !== 'sk-test') throw new Error(`the key was written as "${secret.value}"`);
   if (!fields.includes('apiUrl')) throw new Error('apiUrl was not saved');
   if (!fields.includes('outputFormat')) throw new Error('outputFormat was not saved');
 });
@@ -359,7 +384,7 @@ await check('a newly typed key becomes one secret write', async () => {
   await settle();
   mutations.length = 0;
   const password = findByType('input', { type: 'password' });
-  if (!password) throw new Error('no password field');
+  if (!password) throw new Error('no key field');
   password.props.onChange({ target: { value: 'sk-new' } });
   tree = rerender();
   const save = findByText('保存');
@@ -370,6 +395,9 @@ await check('a newly typed key becomes one secret write', async () => {
 });
 
 await check('a successful write reports the saved state', () => {
+  // The harness applies state updates on the next render pass, so the message a successful
+  // save set is visible only after re-rendering.
+  tree = rerender();
   if (!JSON.stringify(tree).includes('已保存')) throw new Error('no saved message');
 });
 

@@ -12,7 +12,7 @@ export const inject = ['tools'];
 export const Config = z.object({
   apiUrl: z.string().default('https://api.openai.com/v1').volatile(),
 
-  secret: z.string().role('secret').default('').volatile(),
+  secret: z.string().default('').volatile(),
   model: z.string().default('gpt-image-2.5-flare').volatile(),
   count: z.number().default(1).volatile(),
   outputFormat: z.string().default('png').volatile(),
