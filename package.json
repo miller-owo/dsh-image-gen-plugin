@@ -1,0 +1,47 @@
+{
+  "name": "dsh-image-gen-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Image generation tool and settings page for DeepSeek Harness, talking to any OpenAI-compatible /images/generations endpoint.",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "main": "./index.js",
+  "meta": {
+    "title": "Image generation",
+    "description": "Adds a generate_image tool backed by an OpenAI-compatible images endpoint, with a Settings page for the model and its defaults."
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "assets/dsh-image-gen-plugin-logo.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "~3.18.4"
+  },
+  "scripts": {
+    "check": "node checks/all.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+- insert:
+    - id: dsh-image-generation
+      name: 'dsh-image-gen-plugin'
+      config:
+        apiUrl: https://api.openai.com/v1
+        secret: ''
+        model: gpt-image-2.5-flare
+        outputFormat: png
+        outputCompression: 100
+        moderation: auto
+        background: auto
+        user: ''
+        outputDir: ''
+        fileNameFormat: '{time}-{prompt}'
+        defaultResolution: auto
+        requestTimeoutSec: 600
+        maxEdge: 3840
+        sendsModeration: true
+        sendsOutputCompression: true
