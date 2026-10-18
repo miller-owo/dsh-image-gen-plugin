@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -753,6 +753,45 @@ await check('an illegal default size fails the call with the reason, not silentl
   );
   if (!message.includes('8294400')) throw new Error(`the ceiling reason is missing: ${message}`);
   if (!message.includes('2880x2880')) throw new Error('the message does not name the largest workable square');
+});
+
+await check('the manifest only names packages this DSH release actually ships', async () => {
+  // Measured defect this covers: 0.2.1-rc.2 dropped @deepseek-ai/dsh-client-ui-slots, and the
+  // manifest still injected it, so the Client half could not load. A peer pin also froze the
+  // plugin out of the release that moved those packages.
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const installed = (name) => {
+    for (const root of packageRoots) {
+      const candidate = join(root, name.split('/').pop(), 'package.json');
+      if (existsSync(candidate)) return JSON.parse(readFileSync(candidate, 'utf8'));
+    }
+    return null;
+  };
+  const require = createRequire(import.meta.url);
+  const semver = (() => {
+    for (const root of packageRoots) {
+      try {
+        return createRequire(join(root, 'noop.js'))('semver');
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  })();
+  for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
+    const found = installed(name);
+    if (!found) throw new Error(`${name} is a peer but is not installed`);
+    if (!semver) continue;
+    if (!semver.satisfies(found.version, range, { includePrerelease: true })) {
+      throw new Error(`${name} is installed at ${found.version}, which does not satisfy ${range}`);
+    }
+  }
+
+  // Every name here is loaded before this plugin's Client half, so a missing one is the same
+  // failure as a wrong module id: the card never gets a renderer.
+  for (const name of manifest.dsh?.client?.inject ?? []) {
+    if (!installed(name)) throw new Error(`dsh.client.inject names ${name}, which this DSH does not ship`);
+  }
 });
 
 const failures = results.filter((line) => line.startsWith('FAIL'));
