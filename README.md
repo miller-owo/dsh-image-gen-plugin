@@ -9,6 +9,8 @@
 
 请求走的是 **OpenAI 兼容的 `POST {apiUrl}/images/generations`**，参数名与 Dasipaint 的 `openai.rs::build_request` 一致（`model` / `prompt` / `n` / `size` / `quality` / `output_format` / `background`），所以官方 OpenAI、各种中转网关、自建反向代理都能用。
 
+`1.2.0` 起支持 **GPT Image 2.6**（`gpt-image-2.6-flare` / `gpt-image-2.6-sunburst`）：构图复杂度 `complexity`、标注图编辑 `markup`、动图 `gif`、矢量 `svg` 四种新能力，以及取代 `user` 的 `safety_identifier`。详见 [GPT Image 2.6](#gpt-image-26)。
+
 这个工具不挑模型类型：端点背后是自然语言驱动的自回归绘画模型时，提示词会原样透传，不做任何 GPT-image 风格的模板包装；端点背后是别的图片模型时，也照发不误。真正只有 OpenAI 图片接口才认的字段（`moderation`）默认就不发，还给了开关，见「设置项」。
 
 **目录**
@@ -20,6 +22,7 @@
   - [自定义分辨率的规则](#自定义分辨率的规则)
   - [画质档位](#画质档位)
   - [文件名模板](#文件名模板)
+- [GPT Image 2.6](#gpt-image-26)
 - [怎么写提示词](#怎么写提示词)
 - [设置项](#设置项)
 - [工具卡片](#工具卡片)
@@ -27,6 +30,7 @@
 - [文件](#文件)
 - [安全](#安全)
 - [行为说明](#行为说明)
+- [更新记录](#更新记录)
 - [关于源码里的两处约定](#关于源码里的两处约定)
 - [许可与来源](#许可与来源)
 
@@ -62,18 +66,23 @@ dsh plugin --profile web remove dsh-image-gen-plugin
 
 ## 工具参数
 
-`generate_image` 暴露 8 个参数：
+`generate_image` 暴露 13 个参数：
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
 | `prompt` | 是 | 提示词，用自然语言写。要求图里出现文字时，把文字原样引号写清楚，并说明位置和排法 |
 | `resolution` | 否 | **自动比例**（`auto`，默认）或自定义分辨率。自定义写 `宽x高`，如 `1536x864` |
 | `quality` | 否 | 画质：`low` / `medium` / `high` / `xhigh` / `max`，对应 低画质 / 标准画质 / 高画质 / 超高画质 / 顶级画质 |
-| `count` | 否 | 本次生成几张，1–10；不传就用设置里的默认值 |
-| `background` | 否 | `auto` / `transparent` / `opaque` |
+| `format` | 否 | 输出格式：`png` / `jpeg` / `webp` / `gif` / `svg`。后两个需要 GPT Image 2.6；`svg` 只出单图、不能带源图，`gif` 和 `svg` 都不走压缩 |
+| `complexity` | 否 | 构图复杂度：`auto` / `low` / `medium` / `high`。仅 GPT Image 2.6，控制渲染前的规划量，和画质无关 |
+| `count` | 否 | 本次生成几张，1–10；不传就用设置里的默认值。`svg` 固定 1 张 |
+| `background` | 否 | `auto` / `transparent` / `opaque`。透明背景只支持 png / webp |
+| `frames` | 否 | 仅 `gif`：循环帧数 2–16，默认 9 |
+| `frameDurationMs` | 否 | 仅 `gif`：每帧停留毫秒 20–2000，按 10 取整，默认 200 |
 | `location` | 否 | 存储位置。**不传就是会话工作区**；相对路径相对工作区解析，绝对路径原样使用，目录不存在会自动创建 |
 | `images` | 否 | **图生图**：源图路径数组。最多 16 张，每张 ≤50MB |
-| `mask` | 否 | 可选的 PNG 蒙版，标注要改的区域，**必须恰好配 1 张源图**。透明像素是允许重绘的区域，不透明像素保留 |
+| `mask` | 否 | 可选的 PNG 蒙版，标注要改的区域，**必须恰好配 1 张源图**。透明像素是允许重绘的区域，不透明像素保留。`gif` 不支持，且不能和 `markup` 同用 |
+| `markup` | 否 | **标注图编辑**：一张和首张源图同尺寸、带 alpha 通道的透明 PNG，把要改的地方圈出来或画出来；提示词说明改完要变成什么。GPT Image 2.5 / 2.6 |
 
 后几个不传时都取设置页里的默认值；**画质不在设置里**，它是纯调用参数，省略时按 `high` 出图。
 
@@ -89,6 +98,9 @@ dsh plugin --profile web remove dsh-image-gen-plugin
 | 编码 | `application/json` | `multipart/form-data` |
 | 源图 | — | `image` 字段，可多张（**API 硬上限 16 张**） |
 | 蒙版 | — | `mask` 字段，**恰好 1 张 PNG，且只配 1 张源图** |
+| 标注图 | — | `markup` 字段，同尺寸透明 PNG，作用在**首张**源图上；不能和 `mask` 同用 |
+| 动图 | `output_format=gif` | 同样可用；`mask` 不参与（接口不支持带蒙版的 GIF） |
+| 矢量 | `output_format=svg` | 不支持（接口只允许生成端点出 SVG） |
 
 提示词写法要跟着换：文生图描述整幅画面，图生图描述**改动**（"把背景换成纯色影棚墙"、"把毛色改成姜黄"、"加一条红围巾"）。
 
@@ -126,6 +138,22 @@ multipart 是**手写编码**，不是 `FormData`：boundary、CRLF、每个 par
 
 默认 `{time}-{prompt}`。**同名不会覆盖**：写文件用排他创建（`wx` 标志），撞名自动加 `-2`、`-3` 后缀——所以像 `{prompt}` 这种不含身份信息的模板也安全，只是可排序性差一点。
 
+## GPT Image 2.6
+
+OpenAI 在 2026-11-04 发布 Images 2.6，API 上是两个模型：`gpt-image-2.6-flare`（快，适合海报、产品图这类要排版的活）和 `gpt-image-2.6-sunburst`（细，编辑一致性更好）。两者都接受 2.6 的四个新能力，插件全部支持：
+
+**1. `complexity`（构图复杂度）** —— 模型渲染前花多少时间规划，和画质是两个旋钮。`low` 适合「只改背景/招牌」这种聚焦编辑，`high` 适合密集文字和复杂版面。省掉时不发该字段，模型默认 `high`。它不是画质：`quality` 管渲染精细度，`complexity` 管规划。规划越多可能越慢，也可能改到没人要求的地方，所以改图建议先用 `low`。设置页和调用都能配，调用优先。
+
+**2. `markup`（标注图编辑）** —— 把透明 PNG 叠在首张源图上，圈出或画出要改的位置，提示词说明改成什么。插件在本地先校验：必须是 PNG、必须带 alpha 通道、必须和首张源图同尺寸、不超过 16,777,216 像素；不合格的内容不会出网。和 `mask` 二选一。
+
+**3. `gif`（动图）** —— `format: gif` 出循环动画，`frames` 2–16（默认 9）、`frameDurationMs` 20–2000（默认 200，按 10 取整）。生成和编辑端点都支持；不支持流式、局部图、自定义压缩和蒙版。GIF 的帧尺寸比静图宽松：像素下限不再适用（API 只要求每条边是 16 的倍数），总量预算交给接口判断。
+
+**4. `svg`（矢量）** —— `format: svg` 拿可编辑路径、形状和颜色，适合图标、logo、插画。API 先出一张参考图再转成 SVG，`quality` 控制那张参考图。插件按 UTF-8 文本落盘 `.svg`，和图片一样走 `/dsh-image-generation/file/` 路由，但额外带 `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` 与 `X-Content-Type-Options: nosniff`——网关返回的 SVG 里就算夹了脚本，直接打开也不会执行。`svg` 只走生成端点、只出 1 张、不能带源图，也不支持压缩和流式。
+
+**`safety_identifier`**：Images API 已弃用 `user`，推荐每个请求带一个稳定的、做过哈希的终端用户标识（≤128 字符）。设置页新增「安全标识」，填写后只发 `safety_identifier`；留空时才退回老的 `user`，给还不认新字段的网关留余地。
+
+**注意**：这些都是模型侧能力。网关背后如果是 2.5、2 或更早的模型，它会自己拒绝 `complexity` / `gif` / `svg` / `markup`，插件会把那段错误原样带回来。真遇到不认 `complexity` 的端点，设置页的「请求字段」里可以把它关掉。另外 2.6 目前没有带日期的快照版本，也不支持 Batch API。
+
 ## 怎么写提示词
 
 这个工具把提示词原样交给端点背后的模型，不做任何模板化包装。这个模型的自然语言控制力强、**会渲染文字、会排版、审美在线**，知识导图 / 知识卡 / 海报 / 信息图 / 幻灯片这类「有版式、有信息密度」的活正是它的主场。所以：
@@ -146,13 +174,15 @@ multipart 是**手写编码**，不是 `FormData`：boundary、CRLF、每个 par
 | --- | --- | --- |
 | `apiUrl` | `https://api.openai.com/v1` | 接口基地址，会自动拼 `/images/generations` |
 | `secret` | 空 | Bearer 令牌，留空表示不改动。字段名与存法见「安全」 |
-| `model` | `gpt-image-2.5-flare` | 模型 id，任意端点支持的都行，输入框可以直接改成你自己的模型名 |
+| `model` | `gpt-image-2.6-flare` | 模型 id，任意端点支持的都行，输入框可以直接改成你自己的模型名 |
 | `count` | `1` | 默认张数 |
-| `outputFormat` | `png` | `png`/`jpeg`/`webp`；透明背景不能用 jpeg |
+| `outputFormat` | `png` | `png`/`jpeg`/`webp`/`gif`/`svg`；透明背景只支持 png / webp，gif / svg 需要 2.6 |
 | `outputCompression` | `100` | 只对 jpeg / webp 生效 |
 | `background` | `auto` | 默认背景 |
 | `moderation` | `auto` | 只有你显式选了 `low` 才会发这个字段（`auto` 是双方的默认值，不发） |
-| `user` | 空 | 可选终端用户标识 |
+| `complexity` | `auto` | 默认构图复杂度：`auto`（不发，模型默认 high）/ `low` / `medium` / `high` |
+| `safetyIdentifier` | 空 | 可选终端用户标识，随 2.6 请求作为 `safety_identifier` 发送，最长 128 字符 |
+| `user` | 空 | 已弃用；只在安全标识留空时发送，兼容老网关 |
 | `defaultResolution` | `auto` | 调用没写分辨率时用的尺寸。`auto` 让模型自己决定比例 |
 | `maxEdge` | `3840` | 自定义分辨率的最长边上限 |
 | `outputDir` | 空 | 图片落盘目录；留空用插件包内的 `assets/` |
@@ -160,6 +190,7 @@ multipart 是**手写编码**，不是 `FormData`：boundary、CRLF、每个 par
 | `requestTimeoutSec` | `600` | 单次请求超时 |
 | `sendsModeration` | `true` | 关掉后永远不发 `moderation`，给不认这个字段的模型用 |
 | `sendsOutputCompression` | `true` | 关掉后永远不发 `output_compression` |
+| `sendsComplexity` | `true` | 关掉后永远不发 `complexity`，给不认这个字段的模型用 |
 
 设置页里填自定义尺寸时会即时校验，违反上面四条规则会直接标红提示；`defaultResolution` 填了不合法的尺寸时，调用会在发请求前失败并给出原因，不会静默退回默认值；`maxEdge` 改小后 `generate_image` 的工具描述和可用档位会跟着变。画质那一栏已经不是输入框了，那是一段说明文字，告诉你它改成了调用参数。
 
@@ -171,7 +202,7 @@ multipart 是**手写编码**，不是 `FormData`：boundary、CRLF、每个 par
 - **生成中**：直接显示提示词的**前 5 行**（最后可见字符换成省略号）。不用点任何按钮。
 - **出图后**：提示词收起，换成两个展开按钮。
   - **展开提示词** —— 这次调用实际用的**完整**提示词（**全文，不是节段**），仅限高 260px 可滚动，正文一字不裁。
-  - **参数** —— 只列这次真正传了的参数（尺寸、画质、张数、背景、位置、写盘文件数）。没传的不显示、不编造；尺寸省略时显示 `auto`。
+  - **参数** —— 只列这次真正传了的参数（尺寸、画质、格式、复杂度、张数、背景、帧数与帧间隔、位置、源图、蒙版、标注图、写盘文件数）。没传的不显示、不编造；尺寸省略时显示 `auto`。
 - 运行时的参数还在流式写入、是残缺 JSON，所以宿主通过 `inject.hooks.toolCallArgumentsPartial` 注入读取流式前缀的 hook，客户端用容错解析只捞字符串字段（**闭合引号可选**，这正是「边生成边显示」的关键）。hook 缺失或抛错时退回 `block.argsRaw`。
 - 展开状态由 DSH 的 `useDisclosure` 托管（所属 Turn 重置时自动收起）；该 hook 缺失、抛错或返回畸形对象时**自动退回本地状态**，按钮照常可用。空提示词则不显示提示词区块。
 - **卡片不会因为畸形输入而消失**：卡片读的是本插件不拥有的日志，所以每处读取都是全函数（total）——`props`/`block` 不是对象就当归空、`meta.images` 不是数组就当归没有、`url` 不是非空字符串就不渲染（**包括访问器抛异常的条目**）、`argsRaw` 不是字符串就不解析、两个 hook 缺失/抛错/返回 Proxy 都退回本地状态。最外层还有一个 class 错误边界兜底：真抛错时渲染一张**说明失败原因的最小卡片**，而不是留下一行空白。渲染的鲁棒性有一整套畸形输入断言网兜着。
@@ -194,10 +225,10 @@ node show-prompt.mjs
 
 四个套件：
 
-- `checks/host.mjs`：Config 默认值、尺寸四条规则、请求体组装、multipart 逐字节结构、工具注册形状与八个参数、凭证字段命名、文件名消毒、源图校验。
-- `checks/client.mjs`：设置页渲染与保存（含密钥不被回写）、尺寸即时校验与主机同判定、提示词在**三个 phase 全生命周期**的可读性、翻译函数的签名契约、错误边界、中英文切换。
-- `checks/live.mjs`：用假的 fetch 跑完整调用链——落盘、路由取图、错误信息、取消、重试、`images` 路由、输出 schema 校验。
-- `checks/pressure.mjs`：**极端压力套件**。上千条合成畸形输入打向尺寸规则、base64 解码、文件名模板、源图规范化、multipart 编码、生成入口，**任何引擎级异常（TypeError / ReferenceError / Cannot read / is not iterable）都算失败**（「用文字拒绝」是正确结果）。这套件把手写 fetch 桩设为**先记录再抛错**，所以**结构上不可能产生 API 费用**，并会把「出网尝试次数」报出来。
+- `checks/host.mjs`：Config 默认值、尺寸四条规则、请求体组装（含 complexity / 帧参数 / 安全标识）、multipart 逐字节结构（含 markup part）、工具注册形状与十三个参数、凭证字段命名、文件名消毒、源图与标注图校验、SVG 解码与响应头。
+- `checks/client.mjs`：设置页渲染与保存（含密钥不被回写、新字段回写）、尺寸即时校验与主机同判定、模型快捷选项与 2.6 文案、gif/svg 锁压缩、提示词在**三个 phase 全生命周期**的可读性、翻译函数的签名契约、错误边界、中英文切换。
+- `checks/live.mjs`：用假的 fetch 跑完整调用链——落盘、路由取图、gif / svg 输出、markup 编辑、错误信息、取消、重试、`images` 路由、输出 schema 校验。
+- `checks/pressure.mjs`：**极端压力套件**。上千条合成畸形输入打向尺寸规则、base64 解码（含 SVG）、文件名模板、源图规范化、multipart 编码、生成入口（含新参数），**任何引擎级异常（TypeError / ReferenceError / Cannot read / is not iterable）都算失败**（「用文字拒绝」是正确结果）。这套件把手写 fetch 桩设为**先记录再抛错**，所以**结构上不可能产生 API 费用**，并会把「出网尝试次数」报出来。
 
 ## 文件
 
@@ -233,7 +264,8 @@ dsh-image-gen-plugin/
 
 **请求与响应**
 
-- **每张图都会先验证再落盘**：base64 必须合法、必须解码成 PNG/JPEG/WebP/GIF 之一（按魔数嗅探）、不能是零字节、不能超过 50MB。解不出图片时**拒绝写入**并打印开头字节，不会留下一个打开后什么都没有的文件。格式以**字节实际是什么**为准，所以网关被要求 png 却回 jpeg 时不会错标。
+- **每张图都会先验证再落盘**：base64 必须合法、必须解码成 PNG/JPEG/WebP/GIF 之一（按魔数嗅探），或者是一个 `<svg` 开头的 XML 文档（SVG 没有魔数，按文本头和「含 `<svg` 标签」判断，并且拒绝含 NUL 的二进制），不能是零字节、不能超过 50MB。解不出图片时**拒绝写入**并打印开头字节，不会留下一个打开后什么都没有的文件。格式以**字节实际是什么**为准，所以网关被要求 png 却回 jpeg 时不会错标，gif / svg 也按实际字节落成 `.gif` / `.svg`。
+- **矢量输出单独设了内容策略**：`.svg` 通过 `/dsh-image-generation/file/` 打开时带 `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox` 和 `X-Content-Type-Options: nosniff`，网关塞进 SVG 的脚本不会执行。
 - **瞬时故障会自动重试**：408/409/425/429/500/502/503/504/522/524 和连接层故障最多重试 3 次，优先采用 `Retry-After`；429 这类限流不会白等。**4xx（除 429）不重试**——那是调用方自己的错，重试只会烧同样的失败。调用方取消的请求**立即终止**，不会偷偷重发。
 - 工具不发送 `stream`；`partial_images` 因此也不会出现。
 
@@ -242,6 +274,25 @@ dsh-image-gen-plugin/
 - **写文件是排他创建**，不是「先检查再写」，所以两次生成同时完成也不会互相覆盖（消毒规则见「安全」）。
 - 图片通过 Host 的 `/dsh-image-generation/file/<文件名>` 路由展示，到 `location` 指定的任意目录也能取到。路由查表的顺序是「本进程写过的文件表 → 目录扫描 → 落盘索引」：扫描是兜底的那一环（它直接问文件系统，所以无论图是谁写的、有没有被记录过都找得到），前两者只是让重复请求变便宜。**同名优先最新的**，因为 URL 只带文件名，无法区分不同目录的同名文件；越界的 `..` 读取被拒，**畸形的百分号转义返回 400 而不是抛异常**（`decodeURIComponent` 遇 `%` 会抛，未捕获会让请求没有响应）。
 - 卸载后已经生成的图不会被删，会作为孤儿留在原目录里。
+
+## 更新记录
+
+### 1.2.0
+
+- **支持 GPT Image 2.6**：模型快捷选项加入 `gpt-image-2.6-flare` / `gpt-image-2.6-sunburst`，默认模型跟着升级到 2.6-flare。
+- 新增 `complexity`（`auto` / `low` / `medium` / `high`）与「发送 complexity」开关；设置页可配默认值，调用可覆盖。
+- 新增 `format` 调用参数与设置项，支持 `gif`（`frames` / `frameDurationMs`）和 `svg` 输出；落盘扩展名、Content-Type、图片路由按实际格式处理，SVG 附带 CSP 与 nosniff。
+- 新增 `markup` 标注图编辑：透明 PNG、同尺寸、带 alpha、≤16,777,216 像素，本地先校验再出网；与 `mask` 互斥。
+- 新增 `safetyIdentifier`（`safety_identifier`），优先于已弃用的 `user`。
+- 透明背景规则收紧为 png / webp；`svg` 单图、生成端点限定；`gif` 不支持 `mask`。
+- 输出结果新增 `format`，gif 调用额外带回 `frames` / `frameDurationMs`，带复杂度的调用带回 `complexity`。
+- 对齐 DSH 0.2.2-rc.1：peer 依赖更新为 `@deepseek-ai/dsh-tools@0.2.2-rc.1` 与 `@deepseek-ai/schemastery@~3.19.0`。
+- 四套自检同步扩充，新增 gif / svg / markup / complexity / 安全标识的契约与压力断言。
+
+### 1.1.0
+
+- 支持 DSH 0.2.1-rc.2。
+- 设置保存缺陷修复。
 
 ## 关于源码里的两处约定
 

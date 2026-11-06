@@ -70,12 +70,14 @@ const check = async (label, fn) => {
 const config = {
   apiUrl: 'https://api.openai.com/v1',
   secret: 'sk-test',
-  model: 'gpt-image-2.5-flare',
+  model: 'gpt-image-2.6-flare',
   count: 1,
   outputFormat: 'png',
   outputCompression: 100,
   moderation: 'auto',
   background: 'auto',
+  complexity: 'auto',
+  safetyIdentifier: '',
   user: '',
   outputDir: '',
   defaultResolution: 'auto',
@@ -83,15 +85,19 @@ const config = {
   maxEdge: 3840,
   sendsModeration: true,
   sendsOutputCompression: true,
+  sendsComplexity: true,
 };
 
 await check('the config schema resolves every documented default', () => {
   const resolved = host.Config({});
-  if (resolved.model.get() !== 'gpt-image-2.5-flare') throw new Error(resolved.model.get());
+  if (resolved.model.get() !== 'gpt-image-2.6-flare') throw new Error(resolved.model.get());
   if (resolved.outputCompression.get() !== 100) throw new Error('outputCompression');
   if (resolved.count.get() !== 1) throw new Error('count');
   if (resolved.defaultResolution.get() !== 'auto') throw new Error('defaultResolution');
   if (resolved.maxEdge.get() !== 3840) throw new Error('maxEdge');
+  if (resolved.complexity.get() !== 'auto') throw new Error('complexity');
+  if (resolved.safetyIdentifier.get() !== '') throw new Error('safetyIdentifier');
+  if (resolved.sendsComplexity.get() !== true) throw new Error('sendsComplexity');
 });
 
 await check('a volatile field reaches the handler as a readable value', () => {
@@ -99,7 +105,7 @@ await check('a volatile field reaches the handler as a readable value', () => {
   if (resolved.count !== 3) throw new Error(String(resolved.count));
   if (resolved.outputDir !== 'D:/shots') throw new Error(resolved.outputDir);
   if (resolved.secret !== 'k') throw new Error(resolved.secret);
-  if (resolved.model !== 'gpt-image-2.5-flare') throw new Error(resolved.model);
+  if (resolved.model !== 'gpt-image-2.6-flare') throw new Error(resolved.model);
 });
 
 await check('the endpoint rules accept the sizes Dasipaint accepts', () => {
@@ -237,6 +243,129 @@ await check('a transparent background is refused for jpeg output', () => {
     throw new Error('case-insensitive value failed');
   }
   if (host.normalizeBackground(undefined, { ...config, background: 'opaque' }) !== 'opaque') throw new Error('default ignored');
+});
+
+await check('complexity travels only when asked and allowed', () => {
+  if ('complexity' in host.buildBody(config, 'a corgi', '1024x1024', 1, 'auto', 'high')) {
+    throw new Error('auto complexity reached the request');
+  }
+  const asked = host.buildBody({ ...config, complexity: 'low' }, 'a corgi', '1024x1024', 1, 'auto', 'high');
+  if (asked.complexity !== 'low') throw new Error('the configured complexity was dropped');
+  const perCall = host.buildBody({ ...config, complexity: 'low' }, 'a corgi', '1024x1024', 1, 'auto', 'high', {
+    complexity: 'high',
+  });
+  if (perCall.complexity !== 'high') throw new Error('the per-call complexity did not win');
+  const optedOut = host.buildBody({ ...config, complexity: 'low', sendsComplexity: false }, 'a corgi', '1024x1024', 1, 'auto', 'high');
+  if ('complexity' in optedOut) throw new Error('an opted-out complexity was sent');
+  for (const bad of ['ultra', 'max', 'HIGHER']) {
+    let message = '';
+    try {
+      host.normalizeComplexity(bad, config);
+    } catch (error) {
+      message = error.message;
+    }
+    if (!message.includes('complexity')) throw new Error(`${bad} was accepted: ${message}`);
+  }
+});
+
+await check('a safety identifier wins over the deprecated user field', () => {
+  const legacy = host.buildBody({ ...config, user: 'old-user' }, 'x', '1024x1024', 1, 'auto', 'high');
+  if (legacy.user !== 'old-user') throw new Error('a legacy user id was dropped');
+  if ('safety_identifier' in legacy) throw new Error('a safety identifier appeared with none configured');
+
+  const both = host.buildBody({ ...config, user: 'old-user', safetyIdentifier: 'hashed-42' }, 'x', '1024x1024', 1, 'auto', 'high');
+  if (both.safety_identifier !== 'hashed-42') throw new Error('the safety identifier was not sent');
+  if ('user' in both) throw new Error('both identifiers reached the request');
+
+  let message = '';
+  try {
+    host.buildBody({ ...config, safetyIdentifier: 'x'.repeat(129) }, 'x', '1024x1024', 1, 'auto', 'high');
+  } catch (error) {
+    message = error.message;
+  }
+  if (!message.includes('128')) throw new Error(message);
+});
+
+await check('gif output carries its frame controls and no compression', () => {
+  const body = host.buildBody({ ...config, outputFormat: 'gif', outputCompression: 40 }, 'x', '512x512', 1, 'auto', 'high', {
+    format: 'gif',
+    frames: 12,
+    frameDurationMs: 80,
+  });
+  if (body.output_format !== 'gif') throw new Error(body.output_format);
+  if (body.frame_count !== 12) throw new Error(String(body.frame_count));
+  if (body.frame_duration_ms !== 80) throw new Error(String(body.frame_duration_ms));
+  if ('output_compression' in body) throw new Error('gif carried output_compression');
+
+  const defaults = host.buildBody({ ...config, outputFormat: 'gif' }, 'x', 'auto', 1, 'auto', 'high', { format: 'gif' });
+  if (defaults.frame_count !== 9) throw new Error(`default frames ${defaults.frame_count}`);
+  if (defaults.frame_duration_ms !== 200) throw new Error(`default duration ${defaults.frame_duration_ms}`);
+});
+
+await check('gif frame controls reject what the endpoint rejects', () => {
+  const frameCases = [1, 17, 9.5, 'nine', NaN];
+  for (const value of frameCases) {
+    let message = '';
+    try {
+      host.normalizeFrames(value);
+    } catch (error) {
+      message = error.message;
+    }
+    if (!message.includes('frames')) throw new Error(`frames ${String(value)} produced "${message}"`);
+  }
+  if (host.normalizeFrames(undefined) !== 9) throw new Error('the frame default is not 9');
+
+  const durationCases = [19, 2001, 'x', Infinity];
+  for (const value of durationCases) {
+    let message = '';
+    try {
+      host.normalizeFrameDuration(value);
+    } catch (error) {
+      message = error.message;
+    }
+    if (!message.includes('frameDurationMs')) throw new Error(`duration ${String(value)} produced "${message}"`);
+  }
+  if (host.normalizeFrameDuration(1995) !== 2000) throw new Error('a duration was not rounded to 10ms');
+  if (host.normalizeFrameDuration(undefined) !== 200) throw new Error('the duration default is not 200');
+});
+
+await check('gif frames may be smaller than a still image', () => {
+  if (!host.inspectSize('512x512', { ...config, minPixels: 0 }).ok) throw new Error('a small gif frame was refused');
+  if (host.inspectSize('512x512', config).ok) throw new Error('the still-image pixel floor disappeared');
+});
+
+await check('an svg payload decodes as a document, not as a broken image', () => {
+  const svg = Buffer.from(
+    '<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>',
+    'utf8',
+  );
+  const decoded = host.decodeImage(svg.toString('base64'), 'Image 1');
+  if (decoded.format !== 'svg') throw new Error(decoded.format);
+  if (decoded.mime !== 'image/svg+xml') throw new Error(decoded.mime);
+  if (!decoded.bytes.equals(svg)) throw new Error('the vector bytes were altered');
+
+  let message = '';
+  try {
+    host.decodeImage(Buffer.from('<html><body>not art</body></html>').toString('base64'), 'Image 1');
+  } catch (error) {
+    message = error.message;
+  }
+  if (!message.includes('did not decode')) throw new Error(`html was accepted: ${message}`);
+});
+
+await check('the served type follows the extension, and vector gets its own policy', () => {
+  if (host.contentType('a.png') !== 'image/png') throw new Error(host.contentType('a.png'));
+  if (host.contentType('a.GIF') !== 'image/gif') throw new Error(host.contentType('a.GIF'));
+  if (host.contentType('a.svg') !== 'image/svg+xml') throw new Error(host.contentType('a.svg'));
+  const headers = host.responseHeadersFor('a.svg', Buffer.from('<svg/>'));
+  if (headers['content-type'] !== 'image/svg+xml') throw new Error(headers['content-type']);
+  if (headers['content-length'] !== '6') throw new Error(headers['content-length']);
+  if (!String(headers['content-security-policy']).includes("default-src 'none'")) {
+    throw new Error('vector output has no content policy');
+  }
+  if (headers['x-content-type-options'] !== 'nosniff') throw new Error('the sniff guard is missing');
+  const pngHeaders = host.responseHeadersFor('a.png', Buffer.from([1, 2, 3]));
+  if ('content-security-policy' in pngHeaders) throw new Error('raster output inherited the vector policy');
 });
 
 await check('a filename never lands on a reserved device name', () => {
@@ -611,11 +740,12 @@ await check('the records route clears the index, and only for a real confirmatio
   await rm(dir, { recursive: true, force: true });
 });
 
-await check('generate_image registers the eight requested parameters', () => {
+await check('generate_image registers the thirteen requested parameters', () => {
   host.apply(fakeCtx, host.Config({ secret: 'sk-test' }));
   if (registered.name !== 'generate_image') throw new Error(registered.name);
   const keys = Object.keys(registered.parameters.properties);
-  if (keys.join(',') !== 'prompt,resolution,quality,count,background,location,images,mask') throw new Error(keys.join(','));
+  const expected = 'prompt,resolution,quality,format,complexity,count,background,frames,frameDurationMs,location,images,mask,markup';
+  if (keys.join(',') !== expected) throw new Error(keys.join(','));
   if (!registered.parameters.required.includes('prompt')) throw new Error('prompt is optional');
 
   if (keys.includes('mode')) throw new Error('a mode parameter came back');
@@ -624,12 +754,157 @@ await check('generate_image registers the eight requested parameters', () => {
   if (registered.parameters.properties.images.type !== 'array') throw new Error('images is not an array');
   if (registered.parameters.properties.images.items?.type !== 'string') throw new Error('images items are not strings');
   if (registered.parameters.properties.mask.type !== 'string') throw new Error('mask is not a string');
+  if (registered.parameters.properties.format.enum.join(',') !== 'png,jpeg,webp,gif,svg') {
+    throw new Error(registered.parameters.properties.format.enum.join(','));
+  }
+  if (registered.parameters.properties.complexity.enum.join(',') !== 'auto,low,medium,high') {
+    throw new Error(registered.parameters.properties.complexity.enum.join(','));
+  }
+  if (registered.parameters.properties.frames.type !== 'integer') throw new Error('frames type');
+  if (registered.parameters.properties.frameDurationMs.type !== 'integer') throw new Error('frameDurationMs type');
+  if (registered.parameters.properties.markup.type !== 'string') throw new Error('markup is not a string');
+  if (!registered.parameters.properties.format.description.includes('GPT Image 2.6')) {
+    throw new Error('the format parameter does not say which models support gif and svg');
+  }
   if (!registered.description.includes('Settings, Image generation')) throw new Error('description does not name the settings page');
   if (!registered.description.includes('session workspace')) throw new Error('the description does not state where files land');
   if (!registered.description.includes('edit')) throw new Error('the description does not explain the edit behaviour');
 
   if (/cannot edit/i.test(registered.description)) throw new Error('the description still denies editing');
   if (registered.output.schema.properties.mode) throw new Error('the output still reports a mode');
+  if (!registered.output.schema.properties.format) throw new Error('the result does not declare its format');
+});
+
+await check('a markup overlay rides as its own part beside the source image', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-markup-'));
+  const sourcePath = join(dir, 'cat.png');
+  const overlayPath = join(dir, 'circle.png');
+  const overlay = Buffer.from(PNG);
+  overlay[25] = 6;
+  await writeFile(sourcePath, PNG);
+  await writeFile(overlayPath, overlay);
+
+  const sources = await host.readSourceImages([sourcePath]);
+  const markup = await host.readMarkup(overlayPath, sources[0]);
+  if (markup.width !== 8 || markup.height !== 8) throw new Error(`${markup.width}x${markup.height}`);
+  if (markup.mime !== 'image/png') throw new Error(markup.mime);
+  if (markup.name !== 'circle.png') throw new Error(markup.name);
+
+  const { fields } = host.buildEditForm(config, 'recolor the vase', '1024x1024', 1, 'auto', 'high', sources, {
+    format: 'png',
+    complexity: 'low',
+  });
+  const { body } = host.encodeMultipart(fields, sources, null, markup);
+  const text = body.toString('latin1');
+  if (!text.includes('name="markup"; filename="circle.png"')) throw new Error('the markup part is missing');
+  if ((text.match(/name="markup"/g) ?? []).length !== 1) throw new Error('the markup part was written twice');
+  if (!text.includes('Content-Type: image/png')) throw new Error('the markup part has no content type');
+  if (!body.includes(overlay)) throw new Error('the overlay bytes were altered');
+  if (!text.includes('name="image"; filename="cat.png"')) throw new Error('the source image lost its part');
+  if (!text.includes('name="complexity"\r\n\r\nlow')) throw new Error('complexity did not travel beside the markup');
+  await rm(dir, { recursive: true, force: true });
+});
+
+await check('a markup overlay is compared against every source format the plugin accepts', () => {
+  const gif = Buffer.alloc(10);
+  gif.write('GIF89a', 0, 'latin1');
+  gif.writeUInt16LE(64, 6);
+  gif.writeUInt16LE(48, 8);
+  const gifDims = host.imageDimensions(gif);
+  if (gifDims?.width !== 64 || gifDims?.height !== 48) throw new Error(JSON.stringify(gifDims));
+
+  const jpeg = Buffer.alloc(40);
+  jpeg.writeUInt16BE(0xffd8, 0);
+  jpeg.writeUInt16BE(0xffe0, 2);
+  jpeg.writeUInt16BE(0x0010, 4);
+  jpeg.writeUInt16BE(0xffc0, 20);
+  jpeg.writeUInt16BE(0x0011, 22);
+  jpeg[24] = 8;
+  jpeg.writeUInt16BE(48, 25);
+  jpeg.writeUInt16BE(64, 27);
+  const jpegDims = host.imageDimensions(jpeg);
+  if (jpegDims?.width !== 64 || jpegDims?.height !== 48) throw new Error(JSON.stringify(jpegDims));
+
+  const webp = Buffer.alloc(30);
+  webp.write('RIFF', 0, 'latin1');
+  webp.writeUInt32LE(22, 4);
+  webp.write('WEBP', 8, 'latin1');
+  webp.write('VP8X', 12, 'latin1');
+  webp.writeUInt32LE(10, 16);
+  webp.writeUIntLE(63, 24, 3);
+  webp.writeUIntLE(47, 27, 3);
+  const webpDims = host.imageDimensions(webp);
+  if (webpDims?.width !== 64 || webpDims?.height !== 48) throw new Error(JSON.stringify(webpDims));
+
+  if (host.imageDimensions(Buffer.from('not an image')) !== null) throw new Error('junk was given dimensions');
+});
+
+await check('a markup overlay that cannot guide the edit is refused before any request', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-markup-guard-'));
+  const sourcePath = join(dir, 'cat.png');
+  const overlayPath = join(dir, 'circle.png');
+  const flatPath = join(dir, 'flat.png');
+  const bigPath = join(dir, 'big.png');
+  const overlay = Buffer.from(PNG);
+  overlay[25] = 6;
+  const flat = Buffer.from(PNG);
+  flat[25] = 2;
+  const big = Buffer.from(PNG);
+  big[25] = 6;
+  big.writeUInt32BE(16, 16);
+  big.writeUInt32BE(16, 20);
+  await writeFile(sourcePath, PNG);
+  await writeFile(overlayPath, overlay);
+  await writeFile(flatPath, flat);
+  await writeFile(bigPath, big);
+
+  const exec = { signal: new AbortController().signal };
+  const call = (params) => registered.execute(params, exec).then(() => 'resolved', (error) => error.message);
+
+  const noSource = await call({ prompt: 'x', markup: overlayPath });
+  if (!/pass it in images/i.test(noSource)) throw new Error(noSource);
+
+  const withMask = await call({ prompt: 'x', images: [sourcePath], mask: sourcePath, markup: overlayPath });
+  if (!/cannot be combined/i.test(withMask)) throw new Error(withMask);
+
+  const flattened = await call({ prompt: 'x', images: [sourcePath], markup: flatPath });
+  if (!/alpha channel/i.test(flattened)) throw new Error(flattened);
+
+  const mismatched = await call({ prompt: 'x', images: [sourcePath], markup: bigPath });
+  if (!/must match/i.test(mismatched)) throw new Error(mismatched);
+  await rm(dir, { recursive: true, force: true });
+});
+
+await check('svg and gif refuse the combinations the endpoint cannot serve', async () => {
+  host.apply(fakeCtx, host.Config({ secret: 'sk-test' }));
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-format-guard-'));
+  const sourcePath = join(dir, 'cat.png');
+  await writeFile(sourcePath, PNG);
+
+  const exec = { signal: new AbortController().signal };
+  const call = (params) => registered.execute(params, exec).then(() => 'resolved', (error) => error.message);
+
+  const svgEdit = await call({ prompt: 'x', format: 'svg', images: [sourcePath] });
+  if (!/generation endpoint only/i.test(svgEdit)) throw new Error(svgEdit);
+
+  const svgCount = await call({ prompt: 'x', format: 'svg', count: 2 });
+  if (!/one image per call/i.test(svgCount)) throw new Error(svgCount);
+
+  const gifMask = await call({ prompt: 'x', format: 'gif', images: [sourcePath], mask: sourcePath });
+  if (!/cannot carry a mask/i.test(gifMask)) throw new Error(gifMask);
+
+  const gifTransparent = await call({ prompt: 'x', format: 'gif', background: 'transparent' });
+  if (!/transparent/i.test(gifTransparent)) throw new Error(gifTransparent);
+
+  const badFormat = await call({ prompt: 'x', format: 'tiff' });
+  if (!/Unsupported output format|must be one of/i.test(badFormat)) throw new Error(badFormat);
+
+  const badFrames = await call({ prompt: 'x', format: 'gif', frames: 1 });
+  if (!/frames/i.test(badFrames)) throw new Error(badFrames);
+
+  const badDuration = await call({ prompt: 'x', format: 'gif', frameDurationMs: 5 });
+  if (!/frameDurationMs/i.test(badDuration)) throw new Error(badDuration);
+  await rm(dir, { recursive: true, force: true });
 });
 
 await check('location defaults to the workspace and resolves relative paths against it', () => {

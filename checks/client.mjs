@@ -144,6 +144,8 @@ const describeValue = {
         outputCompression: 90,
         background: 'opaque',
         moderation: 'auto',
+        complexity: 'medium',
+        safetyIdentifier: 'hashed-42',
         user: '',
         outputDir: 'D:\\shots',
         requestTimeoutSec: 300,
@@ -358,6 +360,79 @@ await check('png locks the compression slider', () => {
   const slider = findByType('input', { type: 'range' });
   if (!slider) throw new Error('no slider');
   if (slider.props.disabled !== true) throw new Error('slider stayed enabled');
+});
+
+await check('the GPT Image 2.6 models are offered as quick picks', async () => {
+  tree = mount();
+  await settle();
+  const text = JSON.stringify(tree);
+  for (const model of ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']) {
+    if (!text.includes(model)) throw new Error(`${model} is not offered`);
+  }
+  if (!text.includes('GPT Image 2.6')) throw new Error('the model hint does not mention 2.6');
+});
+
+const optionValues = (node) => {
+  const children = Array.isArray(node.props?.children) ? node.props.children : node.props?.children ? [node.props.children] : [];
+  return children.filter((child) => child && child.type === 'option').map((child) => String(child.props?.value));
+};
+
+await check('the complexity row offers the three planning levels', async () => {
+  tree = mount();
+  await settle();
+  const select = findAllByType('select').find((node) => optionValues(node).includes('medium'));
+  if (!select) throw new Error('no select offers a planning level');
+  if (optionValues(select).join(',') !== 'auto,low,medium,high') throw new Error(optionValues(select).join(','));
+  if (select.props.value !== 'medium') throw new Error(`the stored level was ${select.props.value}`);
+
+  select.props.onChange({ target: { value: 'high' } });
+  tree = rerender();
+  mutations.length = 0;
+  await findByText('保存').props.onClick();
+  const op = mutations[0].ops.find((entry) => entry.path[0] === 'complexity');
+  if (!op) throw new Error('complexity was not saved');
+  if (op.value !== 'high') throw new Error(`saved ${op.value}`);
+});
+
+await check('gif and svg are selectable and lock the compression slider', async () => {
+  tree = mount();
+  await settle();
+  const formatSelect = findAllByType('select').find((node) => optionValues(node).includes('gif'));
+  if (!formatSelect) throw new Error('the format select does not offer gif');
+  if (!optionValues(formatSelect).includes('svg')) throw new Error('the format select does not offer svg');
+
+  formatSelect.props.onChange({ target: { value: 'gif' } });
+  tree = rerender();
+  if (findByType('input', { type: 'range' })?.props.disabled !== true) throw new Error('gif did not lock compression');
+
+  const again = findAllByType('select').find((node) => optionValues(node).includes('svg'));
+  again.props.onChange({ target: { value: 'jpeg' } });
+  tree = rerender();
+  if (findByType('input', { type: 'range' })?.props.disabled === true) throw new Error('jpeg did not unlock compression');
+
+  const jpeg = findAllByType('select').find((node) => optionValues(node).includes('svg'));
+  jpeg.props.onChange({ target: { value: 'png' } });
+  tree = rerender();
+});
+
+await check('the safety identifier is editable and saved beside the legacy user field', async () => {
+  tree = mount();
+  await settle();
+  const text = JSON.stringify(tree);
+  if (!text.includes('hashed-42')) throw new Error('the stored safety identifier is not shown');
+  if (!text.includes('安全标识')) throw new Error('the safety identifier row is missing');
+
+  const fields = findAllByType('input').filter((node) => node.props.value === 'hashed-42');
+  if (fields.length !== 1) throw new Error(`${fields.length} fields carry the safety identifier`);
+  fields[0].props.onChange({ target: { value: 'hashed-99' } });
+  tree = rerender();
+  mutations.length = 0;
+  await findByText('保存').props.onClick();
+  const op = mutations[0].ops.find((entry) => entry.path[0] === 'safetyIdentifier');
+  if (!op) throw new Error('the safety identifier was not saved');
+  if (op.value !== 'hashed-99') throw new Error(`saved ${op.value}`);
+  const userOp = mutations[0].ops.find((entry) => entry.path[0] === 'user');
+  if (!userOp) throw new Error('the legacy user field stopped being written');
 });
 
 await check('saving restates every field, the key included', async () => {

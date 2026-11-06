@@ -1,6 +1,6 @@
 {
   "name": "dsh-image-gen-plugin",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "Image generation tool and settings page for DeepSeek Harness, talking to any OpenAI-compatible /images/generations endpoint.",
   "license": "MIT",
@@ -34,8 +34,8 @@
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
-    "@deepseek-ai/schemastery": "~3.18.5"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.19.0"
   },
   "scripts": {
     "check": "node checks/all.mjs"

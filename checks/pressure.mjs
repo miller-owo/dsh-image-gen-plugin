@@ -155,6 +155,25 @@ await check('no malformed source list or field map can crash the multipart encod
     expectNoCrash(`encodeMultipart(sources=${JSON.stringify(sources)?.slice(0, 30)})`, () => host.encodeMultipart({ a: 'b' }, sources, null), crashes);
   }
   expectNoCrash('encodeMultipart(mask=junk)', () => host.encodeMultipart({ a: 'b' }, [{ bytes: PNG, name: 'x.png', mime: 'image/png' }], { name: null }), crashes);
+  expectNoCrash('encodeMultipart(markup=junk)', () => host.encodeMultipart({ a: 'b' }, [{ bytes: PNG, name: 'x.png', mime: 'image/png' }], null, { name: null }), crashes);
+  expectNoCrash('encodeMultipart(markup=string)', () => host.encodeMultipart({ a: 'b' }, [], null, 'markup.png'), crashes);
+  if (crashes.length > 0) throw new Error(`${crashes.length} crashes, first: ${crashes[0]}`);
+});
+
+await check('no malformed svg payload can crash the decoder', () => {
+  const crashes = [];
+  const payloads = [
+    '<svg/>',
+    '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>',
+    '<html><body>not art</body></html>',
+    '\u0000<svg/>',
+    '<',
+    '<svg',
+    '<svgx>',
+  ];
+  for (const text of payloads) {
+    expectNoCrash(`decodeImage(svg ${JSON.stringify(text.slice(0, 12))})`, () => host.decodeImage(Buffer.from(text).toString('base64'), 'X'), crashes);
+  }
   if (crashes.length > 0) throw new Error(`${crashes.length} crashes, first: ${crashes[0]}`);
 });
 
@@ -169,6 +188,11 @@ await check('no malformed call argument can crash the generate entry point', asy
     { prompt: 'x', location: '\u0000' }, { prompt: 'x', location: 123 }, { prompt: 'x', mode: 'edit' },
     { prompt: 'x', mode: 'generate', images: 'a.png' }, { prompt: 'x', images: [null, 0, {}] },
     { prompt: 'x', mask: 'nope.png' }, { prompt: 'x'.repeat(40000) },
+    { prompt: 'x', format: 'gif', frames: 1 }, { prompt: 'x', format: 'gif', frames: 'nine' },
+    { prompt: 'x', format: 'gif', frameDurationMs: -5 }, { prompt: 'x', format: 'svg', count: 2 },
+    { prompt: 'x', format: {} }, { prompt: 'x', format: null }, { prompt: 'x', complexity: 'ultra' },
+    { prompt: 'x', complexity: null }, { prompt: 'x', markup: 'nope.png' },
+    { prompt: 'x', format: 'svg', images: 'a.png' }, { prompt: 'x', compatibility: true },
   ];
   for (const params of paramSets) {
     try {

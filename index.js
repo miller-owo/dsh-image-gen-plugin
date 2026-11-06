@@ -13,12 +13,17 @@ export const Config = z.object({
   apiUrl: z.string().default('https://api.openai.com/v1').volatile(),
 
   secret: z.string().default('').volatile(),
-  model: z.string().default('gpt-image-2.5-flare').volatile(),
+  model: z.string().default('gpt-image-2.6-flare').volatile(),
   count: z.number().default(1).volatile(),
   outputFormat: z.string().default('png').volatile(),
   outputCompression: z.number().default(100).volatile(),
   moderation: z.string().default('auto').volatile(),
   background: z.string().default('auto').volatile(),
+
+  complexity: z.string().default('auto').volatile(),
+
+  safetyIdentifier: z.string().default('').volatile(),
+
   user: z.string().default('').volatile(),
   outputDir: z.string().default('').volatile(),
 
@@ -31,6 +36,7 @@ export const Config = z.object({
 
   sendsModeration: z.boolean().default(true).volatile(),
   sendsOutputCompression: z.boolean().default(true).volatile(),
+  sendsComplexity: z.boolean().default(true).volatile(),
 });
 
 export const IMAGE_ROUTE = '/dsh-image-generation/file';
@@ -38,6 +44,23 @@ const ROUTE_SEGMENT = `${IMAGE_ROUTE}/`;
 const DEFAULT_OUTPUT_DIR = fileURLToPath(new URL('./assets/', import.meta.url));
 
 const BACKGROUNDS = ['auto', 'transparent', 'opaque'];
+export const OUTPUT_FORMATS = ['png', 'jpeg', 'webp', 'gif', 'svg'];
+export const COMPLEXITIES = ['low', 'medium', 'high'];
+
+const TRANSPARENT_FORMATS = ['png', 'webp'];
+
+const GIF_MIN_FRAMES = 2;
+const GIF_MAX_FRAMES = 16;
+const GIF_DEFAULT_FRAMES = 9;
+const GIF_MIN_FRAME_MS = 20;
+const GIF_MAX_FRAME_MS = 2000;
+const GIF_DEFAULT_FRAME_MS = 200;
+const GIF_FRAME_MS_STEP = 10;
+
+const SAFETY_IDENTIFIER_MAX = 128;
+
+const MAX_MARKUP_PIXELS = 16777216;
+
 const MAX_PROMPT_CHARS = 32000;
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 
@@ -55,6 +78,8 @@ const MAX_PIXELS = 8294400;
 
 export function inspectSize(value, limits = {}) {
   const maxEdge = limits.maxEdge ?? 3840;
+  const minPixels = limits.minPixels ?? MIN_PIXELS;
+  const maxPixels = limits.maxPixels ?? MAX_PIXELS;
   const match = /^(\d{2,5})x(\d{2,5})$/i.exec(String(value ?? '').trim());
   if (!match) return { ok: false, reason: 'format' };
   const width = Number(match[1]);
@@ -66,8 +91,8 @@ export function inspectSize(value, limits = {}) {
   if (long / short > 3) return { ok: false, reason: 'ratio', ...sized };
   if (long > maxEdge) return { ok: false, reason: 'cap', ...sized, maxEdge };
   const pixels = width * height;
-  if (pixels < MIN_PIXELS) return { ok: false, reason: 'floor', ...sized, minPixels: MIN_PIXELS };
-  if (pixels > MAX_PIXELS) return { ok: false, reason: 'ceiling', ...sized, maxPixels: MAX_PIXELS };
+  if (pixels < minPixels) return { ok: false, reason: 'floor', ...sized, minPixels };
+  if (pixels > maxPixels) return { ok: false, reason: 'ceiling', ...sized, maxPixels };
   return { ok: true, value: `${width}x${height}`, ...sized, pixels };
 }
 
@@ -87,10 +112,10 @@ export function parseSize(value, limits = {}) {
     fail(`Resolution ${verdict.width}x${verdict.height} is wider than 3:1; the endpoint refuses it.`);
   }
   if (verdict.reason === 'floor') {
-    fail(`Resolution ${verdict.width}x${verdict.height} covers ${verdict.width * verdict.height} pixels, under the ${MIN_PIXELS} the endpoint needs.`);
+    fail(`Resolution ${verdict.width}x${verdict.height} covers ${verdict.width * verdict.height} pixels, under the ${verdict.minPixels} the endpoint needs.`);
   }
   fail(
-    `Resolution ${verdict.width}x${verdict.height} covers ${verdict.width * verdict.height} pixels, over the ${MAX_PIXELS} the endpoint accepts. A ${verdict.width} square sits above that ceiling; 2880x2880 is the largest square that fits.`,
+    `Resolution ${verdict.width}x${verdict.height} covers ${verdict.width * verdict.height} pixels, over the ${verdict.maxPixels} the endpoint accepts. A ${verdict.width} square sits above that ceiling; 2880x2880 is the largest square that fits.`,
   );
 }
 
@@ -124,8 +149,6 @@ export function presetSizes(limits = {}) {
   return sizes;
 }
 
-const isGptImage25 = (model) => String(model).startsWith('gpt-image-2.5-');
-
 function plain(value) {
   if (value === null || typeof value !== 'object') return value;
   if (typeof value.get === 'function') return plain(value.get());
@@ -138,12 +161,14 @@ function effectiveConfig(config) {
   return {
     apiUrl: String(raw.apiUrl ?? '').trim(),
     secret: String(raw.secret ?? ''),
-    model: String(raw.model ?? 'gpt-image-2.5-flare').trim(),
+    model: String(raw.model ?? 'gpt-image-2.6-flare').trim(),
     count: Number(raw.count ?? 1),
     outputFormat: String(raw.outputFormat ?? 'png').trim(),
     outputCompression: Number(raw.outputCompression ?? 100),
     moderation: String(raw.moderation ?? 'auto').trim(),
     background: String(raw.background ?? 'auto').trim(),
+    complexity: String(raw.complexity ?? 'auto').trim().toLowerCase() || 'auto',
+    safetyIdentifier: String(raw.safetyIdentifier ?? '').trim(),
     user: String(raw.user ?? '').trim(),
     outputDir: String(raw.outputDir ?? '').trim(),
     fileNameFormat: String(raw.fileNameFormat ?? '').trim() || DEFAULT_FILE_NAME_PATTERN,
@@ -152,6 +177,7 @@ function effectiveConfig(config) {
     maxEdge: Number(raw.maxEdge ?? 3840),
     sendsModeration: raw.sendsModeration !== false,
     sendsOutputCompression: raw.sendsOutputCompression !== false,
+    sendsComplexity: raw.sendsComplexity !== false,
   };
 }
 
@@ -159,14 +185,60 @@ function fail(message) {
   throw new Error(message);
 }
 
-function normalizeBackground(value, config) {
+function normalizeFormat(value, config) {
+  const requested = String(value ?? '').trim().toLowerCase();
+  const format = requested || String(config.outputFormat ?? '').trim().toLowerCase() || 'png';
+  if (!OUTPUT_FORMATS.includes(format)) {
+    fail(`Unsupported output format "${value ?? format}". Use one of: ${OUTPUT_FORMATS.join(', ')}.`);
+  }
+  return format;
+}
+
+function normalizeComplexity(value, config) {
+  const requested = String(value ?? '').trim().toLowerCase();
+  const complexity = requested || config.complexity || 'auto';
+  if (complexity !== 'auto' && !COMPLEXITIES.includes(complexity)) {
+    fail(`Unsupported complexity "${value}". Use one of: auto, ${COMPLEXITIES.join(', ')}.`);
+  }
+  return complexity;
+}
+
+function normalizeFrames(value) {
+  if (value === undefined || value === null || value === '') return GIF_DEFAULT_FRAMES;
+  const frames = Number(value);
+  if (!Number.isInteger(frames) || frames < GIF_MIN_FRAMES || frames > GIF_MAX_FRAMES) {
+    fail(`frames must be an integer between ${GIF_MIN_FRAMES} and ${GIF_MAX_FRAMES} for GIF output.`);
+  }
+  return frames;
+}
+
+function normalizeFrameDuration(value) {
+  if (value === undefined || value === null || value === '') return GIF_DEFAULT_FRAME_MS;
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw < GIF_MIN_FRAME_MS || raw > GIF_MAX_FRAME_MS) {
+    fail(`frameDurationMs must be between ${GIF_MIN_FRAME_MS} and ${GIF_MAX_FRAME_MS} milliseconds for GIF output.`);
+  }
+
+  return Math.min(GIF_MAX_FRAME_MS, Math.max(GIF_MIN_FRAME_MS, Math.round(raw / GIF_FRAME_MS_STEP) * GIF_FRAME_MS_STEP));
+}
+
+function safetyIdentifierOf(config) {
+  const identifier = String(config.safetyIdentifier ?? '').trim();
+  if (!identifier) return '';
+  if ([...identifier].length > SAFETY_IDENTIFIER_MAX) {
+    fail(`A safety identifier can carry at most ${SAFETY_IDENTIFIER_MAX} characters.`);
+  }
+  return identifier;
+}
+
+function normalizeBackground(value, config, format = config.outputFormat) {
   const requested = String(value ?? '').trim();
   const background = (requested || config.background || 'auto').toLowerCase();
   if (!BACKGROUNDS.includes(background)) {
     fail(`Unsupported background "${value}". Use one of: ${BACKGROUNDS.join(', ')}.`);
   }
-  if (background === 'transparent' && config.outputFormat === 'jpeg') {
-    fail('A transparent background needs png or webp output; change the output format in Settings, Image generation.');
+  if (background === 'transparent' && !TRANSPARENT_FORMATS.includes(format)) {
+    fail(`A transparent background needs png or webp output; ${format} cannot carry it.`);
   }
   return background;
 }
@@ -190,33 +262,45 @@ function normalizeSourcePaths(value) {
   return paths;
 }
 
-function commonFields(config, prompt, size, count, background, quality) {
+function commonFields(config, prompt, size, count, background, quality, options = {}) {
+  const format = options.format ?? config.outputFormat;
   const fields = {
     model: config.model,
     prompt,
     n: count,
     size,
     quality,
-    output_format: config.outputFormat,
+    output_format: format,
     background,
   };
 
+  const complexity = options.complexity ?? config.complexity ?? 'auto';
+  if (complexity !== 'auto' && config.sendsComplexity) {
+    fields.complexity = complexity;
+  }
   if (config.sendsModeration && config.moderation && config.moderation !== 'auto') {
     fields.moderation = config.moderation;
   }
-  if (config.sendsOutputCompression && (config.outputFormat === 'jpeg' || config.outputFormat === 'webp')) {
+  if (config.sendsOutputCompression && (format === 'jpeg' || format === 'webp')) {
     fields.output_compression = Math.min(100, Math.max(0, Math.round(config.outputCompression)));
   }
-  if (config.user) fields.user = config.user;
+  if (format === 'gif') {
+    fields.frame_count = options.frames ?? GIF_DEFAULT_FRAMES;
+    fields.frame_duration_ms = options.frameDurationMs ?? GIF_DEFAULT_FRAME_MS;
+  }
+
+  const safetyIdentifier = safetyIdentifierOf(config);
+  if (safetyIdentifier) fields.safety_identifier = safetyIdentifier;
+  else if (config.user) fields.user = config.user;
   return fields;
 }
 
-function buildBody(config, prompt, size, count, background, quality) {
-  return commonFields(config, prompt, size, count, background, quality);
+function buildBody(config, prompt, size, count, background, quality, options = {}) {
+  return commonFields(config, prompt, size, count, background, quality, options);
 }
 
-function buildEditForm(config, prompt, size, count, background, quality, sources) {
-  return { fields: commonFields(config, prompt, size, count, background, quality), sources };
+function buildEditForm(config, prompt, size, count, background, quality, sources, options = {}) {
+  return { fields: commonFields(config, prompt, size, count, background, quality, options), sources };
 }
 
 const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
@@ -265,7 +349,138 @@ async function readSourceImages(paths) {
   return sources;
 }
 
-function encodeMultipart(fields, sources, mask) {
+function pngHeader(bytes) {
+  if (sniffImage(bytes)?.format !== 'png' || bytes.byteLength < 33) return null;
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  const bitDepth = bytes[24];
+  const colorType = bytes[25];
+
+  let hasTransparencyChunk = false;
+  let offset = 8;
+  while (offset + 12 <= bytes.byteLength) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString('latin1', offset + 4, offset + 8);
+    if (type === 'tRNS') {
+      hasTransparencyChunk = true;
+      break;
+    }
+    if (type === 'IEND') break;
+
+    if (length > bytes.byteLength - offset - 12) break;
+    offset += 12 + length;
+  }
+
+  const hasAlphaChannel = colorType === 4 || colorType === 6;
+  return { width, height, bitDepth, colorType, hasAlpha: hasAlphaChannel || hasTransparencyChunk };
+}
+
+function imageDimensions(bytes) {
+  try {
+    const png = pngHeader(bytes);
+    if (png) return { width: png.width, height: png.height };
+
+    const sniffed = sniffImage(bytes);
+    if (sniffed?.format === 'gif' && bytes.byteLength >= 10) {
+      return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+    }
+
+    if (sniffed?.format === 'jpeg') {
+      let offset = 2;
+      while (offset + 9 < bytes.byteLength) {
+        if (bytes[offset] !== 0xff) {
+          offset += 1;
+          continue;
+        }
+        const marker = bytes[offset + 1];
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          offset += 2;
+          continue;
+        }
+        const length = bytes.readUInt16BE(offset + 2);
+        const isFrameHeader =
+          marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+        if (isFrameHeader) {
+          return { width: bytes.readUInt16BE(offset + 7), height: bytes.readUInt16BE(offset + 5) };
+        }
+        offset += 2 + length;
+      }
+      return null;
+    }
+
+    if (sniffed?.format === 'webp' && bytes.byteLength >= 30) {
+      const chunk = bytes.toString('latin1', 12, 16);
+      if (chunk === 'VP8X') {
+        return { width: 1 + bytes.readUIntLE(24, 3), height: 1 + bytes.readUIntLE(27, 3) };
+      }
+      if (chunk === 'VP8 ') {
+        return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+      }
+      if (chunk === 'VP8L' && bytes.byteLength >= 25) {
+        const bits = bytes.readUInt32LE(21);
+        return { width: 1 + (bits & 0x3fff), height: 1 + ((bits >> 14) & 0x3fff) };
+      }
+    }
+  } catch {
+
+  }
+  return null;
+}
+
+async function readMarkup(path, firstSource) {
+  const raw = typeof path === 'string' ? path.trim() : '';
+  if (!raw) fail('A markup overlay needs a file path.');
+  const filePath = resolve(raw);
+
+  let info;
+  try {
+    info = await stat(filePath);
+  } catch {
+    fail(`Markup overlay not found: ${filePath}`);
+  }
+  if (!info.isFile()) fail(`Markup overlay is not a file: ${filePath}`);
+  if (info.size === 0) fail(`Markup overlay is empty: ${filePath}`);
+  if (info.size > MAX_SOURCE_BYTES) {
+    fail(`Markup overlay exceeds ${MAX_SOURCE_BYTES / 1024 / 1024}MB: ${filePath}`);
+  }
+  const bytes = await readFile(filePath);
+
+  const header = pngHeader(bytes);
+  if (!header) fail(`A markup overlay must be a PNG: ${filePath}`);
+
+  if (!header.hasAlpha) fail(`A markup overlay must keep an alpha channel; ${filePath} has none, so it would hide the image under it.`);
+  if (header.width * header.height > MAX_MARKUP_PIXELS) {
+    fail(`A markup overlay can cover at most ${MAX_MARKUP_PIXELS} pixels; ${filePath} is ${header.width}x${header.height}.`);
+  }
+
+  const base = imageDimensions(firstSource?.bytes ?? Buffer.alloc(0));
+  if (base && (base.width !== header.width || base.height !== header.height)) {
+    fail(
+      `A markup overlay must match the first source image: ${filePath} is ${header.width}x${header.height}, the source is ${base.width}x${base.height}.`,
+    );
+  }
+  return { bytes, name: safeFileName(basename(filePath)), mime: 'image/png', width: header.width, height: header.height };
+}
+
+function filePart(chunks, boundary, partName, part, label) {
+  const { name, mime, bytes } = part ?? {};
+  if (typeof name !== 'string' || !name || typeof mime !== 'string' || !mime || !Buffer.isBuffer(bytes)) {
+    fail(
+      `${label} needs a file name, a content type, and byte content; got ${JSON.stringify({
+        name: typeof name === 'string' ? name : null,
+        mime: typeof mime === 'string' ? mime : null,
+        bytes: Buffer.isBuffer(bytes) ? 'bytes' : null,
+      })}.`,
+    );
+  }
+  chunks.push(
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${partName}"; filename="${name}"\r\nContent-Type: ${mime}\r\n\r\n`, 'utf8'),
+    bytes,
+    Buffer.from('\r\n', 'utf8'),
+  );
+}
+
+function encodeMultipart(fields, sources, mask, markup) {
   const boundary = `----dsh-image-generation-${randomUUID()}`;
   const chunks = [];
   for (const [name, value] of Object.entries(fields ?? {})) {
@@ -293,24 +508,8 @@ function encodeMultipart(fields, sources, mask) {
       Buffer.from('\r\n', 'utf8'),
     );
   }
-  if (mask) {
-
-    const { name, mime, bytes } = mask;
-    if (typeof name !== 'string' || !name || typeof mime !== 'string' || !mime || !Buffer.isBuffer(bytes)) {
-      fail(
-        `A mask part needs a file name, a content type, and byte content; got ${JSON.stringify({
-          name: typeof name === 'string' ? name : null,
-          mime: typeof mime === 'string' ? mime : null,
-          bytes: Buffer.isBuffer(bytes) ? 'bytes' : null,
-        })}.`,
-      );
-    }
-    chunks.push(
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="mask"; filename="${name}"\r\nContent-Type: ${mime}\r\n\r\n`, 'utf8'),
-      bytes,
-      Buffer.from('\r\n', 'utf8'),
-    );
-  }
+  if (mask) filePart(chunks, boundary, 'mask', mask, 'A mask part');
+  if (markup) filePart(chunks, boundary, 'markup', markup, 'A markup part');
   chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
   return { body: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
@@ -338,7 +537,7 @@ const IMAGE_SIGNATURES = [
   { format: 'gif', mime: 'image/gif', bytes: [0x47, 0x49, 0x46, 0x38] },
 ];
 
-const EXTENSION_BY_FORMAT = { png: 'png', jpeg: 'jpg', webp: 'webp', gif: 'gif' };
+const EXTENSION_BY_FORMAT = { png: 'png', jpeg: 'jpg', webp: 'webp', gif: 'gif', svg: 'svg' };
 
 function sniffImage(bytes) {
   for (const signature of IMAGE_SIGNATURES) {
@@ -348,6 +547,14 @@ function sniffImage(bytes) {
     return { format: signature.format, mime: signature.mime };
   }
   return null;
+}
+
+function sniffSvg(bytes) {
+  if (bytes.byteLength < 5 || bytes.includes(0x00)) return null;
+  const head = bytes.subarray(0, 8192).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+  if (!head.startsWith('<')) return null;
+  if (!/<svg[\s>]/i.test(head)) return null;
+  return { format: 'svg', mime: 'image/svg+xml' };
 }
 
 export function decodeImage(base64, label) {
@@ -361,9 +568,9 @@ export function decodeImage(base64, label) {
   const bytes = Buffer.from(text, 'base64');
   if (bytes.byteLength === 0) fail(`${label} decoded to zero bytes.`);
   if (bytes.byteLength > MAX_IMAGE_BYTES) fail(`${label} exceeds ${MAX_IMAGE_BYTES / 1024 / 1024}MB.`);
-  const sniffed = sniffImage(bytes);
+  const sniffed = sniffImage(bytes) ?? sniffSvg(bytes);
   if (!sniffed) {
-    fail(`${label} did not decode to a PNG, JPEG, WebP, or GIF; the first bytes were ${printableHead(bytes.subarray(0, 16).toString('latin1'), 16)}.`);
+    fail(`${label} did not decode to a PNG, JPEG, WebP, GIF, or SVG; the first bytes were ${printableHead(bytes.subarray(0, 16).toString('latin1'), 16)}.`);
   }
   return { bytes, ...sniffed };
 }
@@ -547,14 +754,24 @@ async function generate(params, config, exec) {
   if (!prompt) throw new Error('A prompt is required.');
   if (prompt.length > MAX_PROMPT_CHARS) throw new Error(`The prompt must stay under ${MAX_PROMPT_CHARS} characters.`);
 
+  const format = normalizeFormat(params.format, config);
+  const complexity = normalizeComplexity(params.complexity, config);
+
   const count = Number(params.count ?? config.count ?? 1);
   if (!Number.isInteger(count) || count < 1 || count > 10) {
     throw new Error('count must be an integer between 1 and 10.');
   }
+  if (format === 'svg' && count !== 1) {
+    throw new Error('SVG output is one image per call; drop count or pick another format.');
+  }
 
+  const frames = format === 'gif' ? normalizeFrames(params.frames) : null;
+  const frameDurationMs = format === 'gif' ? normalizeFrameDuration(params.frameDurationMs) : null;
+
+  const sizeLimits = format === 'gif' ? { ...config, minPixels: 0 } : config;
   const requested = String(params.resolution ?? '').trim();
-  const configuredDefault = config.defaultResolution === 'auto' ? 'auto' : parseSize(config.defaultResolution, config);
-  const size = !requested || requested === 'auto' ? configuredDefault : parseSize(requested, config);
+  const configuredDefault = config.defaultResolution === 'auto' ? 'auto' : parseSize(config.defaultResolution, sizeLimits);
+  const size = !requested || requested === 'auto' ? configuredDefault : parseSize(requested, sizeLimits);
 
   const askedQuality = String(params.quality ?? '').trim().toLowerCase();
   if (askedQuality && !QUALITIES.includes(askedQuality)) {
@@ -562,7 +779,7 @@ async function generate(params, config, exec) {
   }
   const quality = askedQuality || DEFAULT_QUALITY;
 
-  const background = normalizeBackground(params.background, config);
+  const background = normalizeBackground(params.background, config, format);
   const workspace = exec?.agent?.session?.header?.cwd;
 
   rememberWorkspace(workspace);
@@ -571,19 +788,34 @@ async function generate(params, config, exec) {
   const sourcePaths = normalizeSourcePaths(params.images ?? params.image);
 
   const sources = await readSourceImages(sourcePaths);
+  if (format === 'svg' && sources.length > 0) {
+    fail('SVG output comes from the generation endpoint only; drop images or pick png, jpeg, webp, or gif.');
+  }
   const mask = params.mask ? (await readSourceImages([params.mask]))[0] : null;
   if (mask && sources.length !== 1) {
     fail(`A mask applies to exactly one source image; ${sources.length} were given.`);
   }
+  if (mask && format === 'gif') {
+    fail('GIF output cannot carry a mask; describe the change in the prompt instead.');
+  }
+
+  let markup = null;
+  if (params.markup) {
+    if (mask) fail('A markup overlay and a mask cannot be combined; pick one way to point at the change.');
+    if (sources.length === 0) fail('A markup overlay edits the first source image; pass it in images as well.');
+    markup = await readMarkup(params.markup, sources[0]);
+  }
+
+  const options = { format, complexity, frames, frameDurationMs };
 
   const payload = sources.length
     ? (() => {
-        const { fields } = buildEditForm(config, prompt, size, count, background, quality, sources);
-        const encoded = encodeMultipart(fields, sources, mask);
+        const { fields } = buildEditForm(config, prompt, size, count, background, quality, sources, options);
+        const encoded = encodeMultipart(fields, sources, mask, markup);
         return { endpoint: '/images/edits', ...encoded };
       })()
     : (() => {
-        const body = JSON.stringify(buildBody(config, prompt, size, count, background, quality));
+        const body = JSON.stringify(buildBody(config, prompt, size, count, background, quality, options));
         return { endpoint: '/images/generations', body, contentType: 'application/json' };
       })();
 
@@ -597,8 +829,11 @@ async function generate(params, config, exec) {
     size,
     quality,
     background,
+    format,
     requested: count,
     returned: images.length,
+    ...(complexity !== 'auto' && config.sendsComplexity ? { complexity } : {}),
+    ...(format === 'gif' ? { frames, frameDurationMs } : {}),
 
     ...(Number.isFinite(usage?.total_tokens) ? { usageTokens: usage.total_tokens } : {}),
   };
@@ -606,8 +841,17 @@ async function generate(params, config, exec) {
 
 export function toolText(value) {
   const paths = value.images.map((image) => `${image.index}. ${image.path}`);
+  const detail = [
+    value.model,
+    value.size,
+    `quality ${value.quality}`,
+    `background ${value.background}`,
+    `format ${value.format}`,
+  ];
+  if (value.complexity) detail.push(`complexity ${value.complexity}`);
+  if (value.frames) detail.push(`${value.frames} frames at ${value.frameDurationMs}ms`);
   return [
-    `Generated ${value.returned} image${value.returned === 1 ? '' : 's'} with ${value.model} (${value.size}, quality ${value.quality}, background ${value.background}), written to ${value.savedTo}.`,
+    `Generated ${value.returned} image${value.returned === 1 ? '' : 's'} with ${detail.join(', ')}, written to ${value.savedTo}.`,
     ...paths,
   ].join('\n');
 }
@@ -623,12 +867,28 @@ const decodeMeta = (value) => {
   }
 };
 
-const contentType = (fileName) =>
-  fileName.endsWith('.jpg') || fileName.endsWith('.jpeg')
-    ? 'image/jpeg'
-    : fileName.endsWith('.webp')
-      ? 'image/webp'
-      : 'image/png';
+const contentType = (fileName) => {
+  const lower = String(fileName ?? '').toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  return 'image/png';
+};
+
+function responseHeadersFor(fileName, bytes) {
+  const type = contentType(fileName);
+  const headers = {
+    'content-type': type,
+    'content-length': String(bytes.byteLength),
+    'cache-control': 'private, max-age=31536000, immutable',
+    'x-content-type-options': 'nosniff',
+  };
+  if (type === 'image/svg+xml') {
+    headers['content-security-policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+  }
+  return headers;
+}
 
 const SERVED_INDEX_LIMIT = 2000;
 
@@ -688,7 +948,7 @@ async function backfillIndexFrom(root) {
       }
       if (!entry.isFile()) continue;
 
-      if (!/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-.+\.(png|jpg|webp|gif)$/i.test(entry.name)) continue;
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-.+\.(png|jpe?g|webp|gif|svg)$/i.test(entry.name)) continue;
       found.set(entry.name, target);
     }
   }
@@ -803,7 +1063,7 @@ const WORKSPACE_SCAN_DEPTH = 2;
 const WORKSPACE_SCAN_LIMIT = 4000;
 
 const WORKSPACE_SCAN_BUDGET_MS = 60;
-const PLUGIN_FRAME_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-.+\.(png|jpg|webp|gif)$/i;
+const PLUGIN_FRAME_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-.+\.(png|jpe?g|webp|gif|svg)$/i;
 
 const OUTPUT_HINT = /^(out|output|outputs|images?|frames?|shots?|assets|generated|exports?|png|webp)$/i;
 
@@ -869,11 +1129,7 @@ async function serveImage(req, res, config) {
       const bytes = await readFile(candidate);
 
       if (!remembered.includes(candidate)) rememberFile(candidate);
-      res.writeHead(200, {
-        'content-type': contentType(fileName),
-        'content-length': String(bytes.byteLength),
-        'cache-control': 'private, max-age=31536000, immutable',
-      });
+      res.writeHead(200, responseHeadersFor(fileName, bytes));
       res.end(bytes);
       return;
     } catch {
@@ -889,11 +1145,7 @@ async function serveImage(req, res, config) {
         const bytes = await readFile(found);
 
         rememberFile(found);
-        res.writeHead(200, {
-          'content-type': contentType(fileName),
-          'content-length': String(bytes.byteLength),
-          'cache-control': 'private, max-age=31536000, immutable',
-        });
+        res.writeHead(200, responseHeadersFor(fileName, bytes));
         res.end(bytes);
         return;
       } catch {
@@ -932,8 +1184,9 @@ export function apply(ctx, config) {
         'What it is good at: posters, knowledge cards, knowledge maps, infographics, charts, slides, UI mockups, and multi-panel sheets with correct text and real layout; photorealistic people, places, products, food, interiors, and everyday scenes; illustrations and plain scenes; and game or image assets such as sprites, sprite sheets, tilesets, icons, item and character art, textures, and UI elements, on a transparent background when the asset needs one.',
         'Use one call with count for variations of one image. Use separate calls when the frames or the content differ.',
         'A custom frame must satisfy the endpoint exactly: every side a multiple of 16, the longest edge within the cap, 655,360 to 8,294,400 pixels total, and a ratio no wider than 3:1.',
-        'Files land in the session workspace unless location points somewhere else. Settings, Image generation owns the endpoint, credentials, model, and output format. Resolution, quality, count, background, location, and the source images are per-call arguments.',
+        'Files land in the session workspace unless location points somewhere else. Settings, Image generation owns the endpoint, credentials, model, and output format. Resolution, quality, format, complexity, count, background, animation timing, location, and the source images are per-call arguments.',
         'Passing images turns this from a generation into an edit: the source pictures are sent to the endpoint as the basis of the result, and the prompt describes the change rather than the whole scene.',
+        'GPT Image 2.6 adds three things worth reaching for: complexity for how much the model plans before it renders, markup for circling or annotating the exact spot to change, and gif or svg output for animated or vector assets. All three are model-side features, so a gateway that serves an older model will refuse them; the error names what it refused.',
       ].join(' '),
       parameters: {
         prompt: {
@@ -944,23 +1197,43 @@ export function apply(ctx, config) {
         },
         resolution: {
           type: 'string',
-          description: `Output frame, written as WIDTHxHEIGHT, or "auto" to let the model choose a fitting ratio. Omit the parameter to inherit the configured default. The endpoint accepts a custom size when every side is a multiple of 16, the longest edge is at most ${readConfig().maxEdge}, the total is between 655,360 and 8,294,400 pixels, and the ratio is no wider than 3:1. Ready-made sizes that pass: ${presets.join(', ')}.`,
+          description: `Output frame, written as WIDTHxHEIGHT, or "auto" to let the model choose a fitting ratio. Omit the parameter to inherit the configured default. The endpoint accepts a custom size when every side is a multiple of 16, the longest edge is at most ${readConfig().maxEdge}, the total is between 655,360 and 8,294,400 pixels, and the ratio is no wider than 3:1. For gif output this is the size of each finished frame and the pixel floor does not apply, so a small loop is allowed; the whole request still has to fit the model's budget. Ready-made sizes that pass: ${presets.join(', ')}.`,
         },
         quality: {
           type: 'string',
           enum: QUALITIES,
           description: `Render quality, lowest effort first: ${QUALITIES.join(', ')}. Omit to use ${DEFAULT_QUALITY}.`,
         },
+        format: {
+          type: 'string',
+          enum: OUTPUT_FORMATS,
+          description:
+            'File format to return. png, jpeg, and webp always work; gif makes a looping animation and svg returns editable vector paths. gif and svg need a GPT Image 2.6 model. svg takes exactly one image and no source images, and both gif and svg ignore compression. Omit to inherit the configured format.',
+        },
+        complexity: {
+          type: 'string',
+          enum: ['auto', ...COMPLEXITIES],
+          description:
+            'How much the model plans before it renders, on GPT Image 2.6: low suits a focused edit such as a background or a sign, high helps dense text and complex layouts, and medium sits between them. It is not render quality; quality is a separate knob. Higher planning can be slower and can move details nobody asked about. Omit to inherit the configured default; the model default is high.',
+        },
         count: {
           type: 'integer',
           description:
-            'How many images to generate in this call, 1 to 10. Use it for variations of one prompt. Omit to use the configured default.',
+            'How many images to generate in this call, 1 to 10. Use it for variations of one prompt. Omit to use the configured default. svg output always returns exactly one.',
         },
         background: {
           type: 'string',
           enum: BACKGROUNDS,
           description:
             'auto keeps the model default, transparent leaves no background and needs png or webp output (use it for an asset meant to be dropped onto another surface), opaque fills it.',
+        },
+        frames: {
+          type: 'integer',
+          description: `Only for gif output: how many frames the loop holds, ${GIF_MIN_FRAMES} to ${GIF_MAX_FRAMES}. Omit to use ${GIF_DEFAULT_FRAMES}. Say the motion and how the loop closes in the prompt; more frames cost more.`,
+        },
+        frameDurationMs: {
+          type: 'integer',
+          description: `Only for gif output: how long each frame stays on screen, ${GIF_MIN_FRAME_MS} to ${GIF_MAX_FRAME_MS} milliseconds, rounded to 10. Omit to use ${GIF_DEFAULT_FRAME_MS}.`,
         },
         location: {
           type: 'string',
@@ -976,7 +1249,12 @@ export function apply(ctx, config) {
         mask: {
           type: 'string',
           description:
-            'Optional PNG that marks the region to change, used with exactly one source image in images. Transparent pixels are the area the model is free to repaint and opaque pixels are kept, so it must be the same size as the source and have an alpha channel. Omit it to let the model decide what to change across the whole image.',
+            'Optional PNG that marks the region to change, used with exactly one source image in images. Transparent pixels are the area the model is free to repaint and opaque pixels are kept, so it must be the same size as the source and have an alpha channel. Omit it to let the model decide what to change across the whole image. Not available with gif output, and cannot be combined with markup.',
+        },
+        markup: {
+          type: 'string',
+          description:
+            'Optional transparent PNG laid over the first source image to show the change: circle the vase that should turn cobalt, sketch the door that should move. It must match that image pixel for pixel and keep its alpha channel, and the prompt says what the marked area becomes. GPT Image 2.5 and 2.6 only. Omit it when a mask or plain words are enough.',
         },
       },
       output: {
@@ -1005,6 +1283,10 @@ export function apply(ctx, config) {
             size: { type: 'string', required: true },
             quality: { type: 'string', required: true },
             background: { type: 'string', required: true },
+            format: { type: 'string', required: true },
+            complexity: { type: 'string' },
+            frames: { type: 'integer' },
+            frameDurationMs: { type: 'integer' },
             requested: { type: 'integer', required: true },
             returned: { type: 'integer', required: true },
             usageTokens: { type: 'integer' },
@@ -1013,7 +1295,17 @@ export function apply(ctx, config) {
         render: (_args, value) => [{ type: 'text', text: toolText(value) }],
         presentationMeta: (_args, value) => ({
           title: `Generated ${value.returned} image${value.returned === 1 ? '' : 's'}`,
-          summary: `${value.model} · ${value.size} · quality ${value.quality} · ${value.background}`,
+          summary: [
+            value.model,
+            value.size,
+            `quality ${value.quality}`,
+            `background ${value.background}`,
+            `format ${value.format}`,
+            value.complexity ? `complexity ${value.complexity}` : null,
+            value.frames ? `${value.frames} frames` : null,
+          ]
+            .filter(Boolean)
+            .join(' · '),
           savedTo: value.savedTo,
           images: value.images.map((image) => ({
             url: image.url,
@@ -1044,4 +1336,23 @@ export function apply(ctx, config) {
   });
 }
 
-export { BACKGROUNDS, backfillIndexFrom, buildBody, buildEditForm, effectiveConfig, encodeMultipart, normalizeBackground, normalizeSourcePaths, readSourceImages, safeFileName };
+export {
+  BACKGROUNDS,
+  backfillIndexFrom,
+  buildBody,
+  buildEditForm,
+  contentType,
+  effectiveConfig,
+  encodeMultipart,
+  imageDimensions,
+  normalizeBackground,
+  normalizeComplexity,
+  normalizeFormat,
+  normalizeFrameDuration,
+  normalizeFrames,
+  normalizeSourcePaths,
+  readMarkup,
+  readSourceImages,
+  responseHeadersFor,
+  safeFileName,
+};

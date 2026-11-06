@@ -4,11 +4,14 @@
       config:
         apiUrl: https://api.openai.com/v1
         secret: ''
-        model: gpt-image-2.5-flare
+        model: gpt-image-2.6-flare
+        count: 1
         outputFormat: png
         outputCompression: 100
         moderation: auto
         background: auto
+        complexity: auto
+        safetyIdentifier: ''
         user: ''
         outputDir: ''
         fileNameFormat: '{time}-{prompt}'
@@ -17,3 +20,4 @@
         maxEdge: 3840
         sendsModeration: true
         sendsOutputCompression: true
+        sendsComplexity: true

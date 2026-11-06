@@ -331,7 +331,7 @@ await check('the request body is exactly what the endpoint expects', () => {
   if (url !== 'https://api.openai.com/v1/images/generations') throw new Error(url);
   if (init.method !== 'POST') throw new Error(init.method);
   const body = JSON.parse(init.body);
-  if (body.model !== 'gpt-image-2.5-flare') throw new Error(body.model);
+  if (body.model !== 'gpt-image-2.6-flare') throw new Error(body.model);
   if (body.n !== 2) throw new Error(`n ${body.n}`);
   if (body.size !== '1536x1024') throw new Error(body.size);
   if (body.background !== 'transparent') throw new Error(body.background);
@@ -339,6 +339,8 @@ await check('the request body is exactly what the endpoint expects', () => {
   if (body.output_format !== 'png') throw new Error(body.output_format);
   if ('moderation' in body) throw new Error('moderation reached 2.5');
   if ('stream' in body) throw new Error('stream was sent');
+  if ('complexity' in body) throw new Error('auto complexity was sent');
+  if ('safety_identifier' in body) throw new Error('an empty safety identifier was sent');
 });
 
 await check('the image route serves the written file with a sane content type', async () => {
@@ -491,6 +493,144 @@ await check('a text-only call still reaches the generation endpoint as JSON', as
   if (seen.init.headers['content-type'] !== 'application/json') throw new Error(seen.init.headers['content-type']);
   const body = JSON.parse(seen.init.body);
   if (body.prompt !== 'a corgi') throw new Error(body.prompt);
+});
+
+const serve = async (fileName) => {
+  let status = 0;
+  let headers;
+  let payload;
+  const res = {
+    writeHead(code, head) {
+      status = code;
+      headers = head;
+      return this;
+    },
+    end(chunk) {
+      payload = chunk;
+      return this;
+    },
+  };
+  await registeredRoute.handler({ url: `/dsh-image-generation/file/${encodeURIComponent(fileName)}` }, res);
+  return { status, headers, payload };
+};
+
+await check('gif output asks for its frames and writes what came back', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-gif-'));
+  const gifBytes = Buffer.concat([Buffer.from('GIF89a', 'latin1'), Buffer.alloc(48, 0x21)]);
+  const original = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (url, init) => {
+    seen = { url, init };
+    return new Response(JSON.stringify({ data: [{ b64_json: gifBytes.toString('base64') }] }), { status: 200 });
+  };
+  applyPlugin(Config({ secret: 'sk-test', outputDir: dir }));
+  const value = await registered.execute(
+    { prompt: 'a paper plane looping once', format: 'gif', frames: 12, frameDurationMs: 80, resolution: '512x512' },
+    execution(),
+  );
+  globalThis.fetch = original;
+
+  const body = JSON.parse(seen.init.body);
+  if (seen.url !== 'https://api.openai.com/v1/images/generations') throw new Error(seen.url);
+  if (body.output_format !== 'gif') throw new Error(body.output_format);
+  if (body.frame_count !== 12) throw new Error(`frame_count ${body.frame_count}`);
+  if (body.frame_duration_ms !== 80) throw new Error(`frame_duration_ms ${body.frame_duration_ms}`);
+  if ('output_compression' in body) throw new Error('gif carried output_compression');
+  if (body.n !== 1) throw new Error(`n ${body.n}`);
+
+  if (value.format !== 'gif') throw new Error(value.format);
+  if (value.frames !== 12 || value.frameDurationMs !== 80) throw new Error(`${value.frames}/${value.frameDurationMs}`);
+  if (!value.images[0].path.endsWith('.gif')) throw new Error(value.images[0].path);
+  if (!value.images[0].mime.includes('gif')) throw new Error(value.images[0].mime);
+  const info = await stat(value.images[0].path);
+  if (info.size !== gifBytes.byteLength) throw new Error(`${value.images[0].path} holds ${info.size} bytes`);
+
+  const name = value.images[0].path.split(/[\\/]/).pop();
+  const served = await serve(name);
+  if (served.status !== 200) throw new Error(`the gif answered ${served.status}`);
+  if (served.headers['content-type'] !== 'image/gif') throw new Error(served.headers['content-type']);
+  await rm(dir, { recursive: true, force: true });
+});
+
+await check('svg output writes the vector document and serves it as a policy-bound document', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-svg-'));
+  const svg = Buffer.from(
+    '<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><circle cx="32" cy="32" r="30" fill="teal"/></svg>',
+    'utf8',
+  );
+  const original = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (url, init) => {
+    seen = { url, init };
+    return new Response(JSON.stringify({ data: [{ b64_json: svg.toString('base64') }] }), { status: 200 });
+  };
+  applyPlugin(Config({ secret: 'sk-test', outputDir: dir }));
+  const value = await registered.execute({ prompt: 'a teal dot as an editable icon', format: 'svg' }, execution());
+  globalThis.fetch = original;
+
+  const body = JSON.parse(seen.init.body);
+  if (body.output_format !== 'svg') throw new Error(body.output_format);
+  if (body.n !== 1) throw new Error(`svg asked for ${body.n} images`);
+  if ('frame_count' in body) throw new Error('svg carried frame controls');
+
+  if (value.format !== 'svg') throw new Error(value.format);
+  if (value.frames !== undefined) throw new Error('a still vector reported frames');
+  if (!value.images[0].path.endsWith('.svg')) throw new Error(value.images[0].path);
+  if (value.images[0].mime !== 'image/svg+xml') throw new Error(value.images[0].mime);
+  const written = await readFile(value.images[0].path);
+  if (!written.equals(svg)) throw new Error('the vector document changed on the way to disk');
+
+  const name = value.images[0].path.split(/[\\/]/).pop();
+  const served = await serve(name);
+  if (served.status !== 200) throw new Error(`the svg answered ${served.status}`);
+  if (served.headers['content-type'] !== 'image/svg+xml') throw new Error(served.headers['content-type']);
+  if (!String(served.headers['content-security-policy'] ?? '').includes("default-src 'none'")) {
+    throw new Error('the vector document was served without a content policy');
+  }
+  await rm(dir, { recursive: true, force: true });
+});
+
+await check('a markup edit carries the overlay, the plan level, and the safety identifier', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-markup-live-'));
+  const sourcePath = join(dir, 'kitchen.png');
+  const overlayPath = join(dir, 'circle.png');
+  const overlay = Buffer.from(png);
+  overlay[25] = 6;
+  await writeFile(sourcePath, png);
+  await writeFile(overlayPath, overlay);
+
+  const original = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (url, init) => {
+    seen = { url, init };
+    return new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }), { status: 200 });
+  };
+  applyPlugin(Config({ secret: 'sk-test', outputDir: dir, safetyIdentifier: 'hashed-42', user: 'legacy-user' }));
+  const value = await registered.execute(
+    {
+      prompt: 'Recolor the vase inside the circle to cobalt blue.',
+      images: [sourcePath],
+      markup: overlayPath,
+      complexity: 'low',
+    },
+    execution(),
+  );
+  globalThis.fetch = original;
+
+  if (!seen.url.endsWith('/images/edits')) throw new Error(seen.url);
+  const body = Buffer.from(seen.init.body).toString('latin1');
+  if (!body.includes('name="image"; filename="kitchen.png"')) throw new Error('the source image is missing');
+  if (!body.includes('name="markup"; filename="circle.png"')) throw new Error('the markup overlay is missing');
+  if (!body.includes('name="safety_identifier"\r\n\r\nhashed-42')) throw new Error('the safety identifier did not travel');
+  if (body.includes('name="user"')) throw new Error('the deprecated user field was sent beside it');
+  if (!body.includes('name="complexity"\r\n\r\nlow')) throw new Error('the complexity did not travel');
+  if (!body.includes('Recolor the vase inside the circle')) throw new Error('the prompt did not travel');
+
+  if (value.format !== 'png') throw new Error(value.format);
+  if (value.complexity !== 'low') throw new Error(String(value.complexity));
+  const info = await stat(value.images[0].path);
+  if (info.size !== png.byteLength) throw new Error('the edited frame was not written');
+  await rm(dir, { recursive: true, force: true });
 });
 
 await check('a missing source image fails before any request leaves', async () => {

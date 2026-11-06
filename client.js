@@ -18,15 +18,19 @@ window.__ModuleLoader__.load({
     const LOCALE_NS = 'dsh-image-generation';
 
     const BUILTIN_MODELS = [
+      'gpt-image-2.6-flare',
+      'gpt-image-2.6-sunburst',
       'gpt-image-2.5-flare',
       'gpt-image-2.5-flare-2026-09-08',
       'gpt-image-2.5-sunburst',
+      'gpt-image-2.5-sunburst-2026-09-08',
       'gpt-image-2',
       'gpt-image-2-2026-04-21',
     ];
-    const FORMATS = ['png', 'jpeg', 'webp'];
+    const FORMATS = ['png', 'jpeg', 'webp', 'gif', 'svg'];
     const MODERATIONS = ['auto', 'low'];
     const BACKGROUNDS = ['auto', 'transparent', 'opaque'];
+    const COMPLEXITIES = ['auto', 'low', 'medium', 'high'];
     const COUNTS = [1, 2, 3, 4];
 
     const NAME_TOKENS = ['{time}', '{prompt}', '{index}', '{uniq}'];
@@ -51,6 +55,8 @@ window.__ModuleLoader__.load({
       'outputCompression',
       'background',
       'moderation',
+      'complexity',
+      'safetyIdentifier',
       'user',
       'defaultResolution',
       'maxEdge',
@@ -59,6 +65,7 @@ window.__ModuleLoader__.load({
       'requestTimeoutSec',
       'sendsModeration',
       'sendsOutputCompression',
+      'sendsComplexity',
     ];
 
     const EN = {
@@ -67,7 +74,7 @@ window.__ModuleLoader__.load({
       subtitle:
         'Where calls are sent, and what they fall back to. The model and endpoint decide whether a call can work at all; every default below only applies when a call leaves that argument out.',
       labelModel: 'Model',
-      hintModel: 'The model id exactly as this endpoint names it. The quick picks cover the GPT Image 2.5 and 2 families; type in anything else your gateway offers.',
+      hintModel: 'The model id exactly as this endpoint names it. The quick picks cover the GPT Image 2.6, 2.5, and 2 families; type in anything else your gateway offers.',
       labelApiUrl: 'API URL',
       hintApiUrl: 'Base URL of an OpenAI-compatible API. /images/generations is appended to it.',
       labelApiKey: 'API key',
@@ -90,14 +97,18 @@ window.__ModuleLoader__.load({
       labelCount: 'Count',
       hintCount: 'Used when a call does not pass its own count. The API accepts 1 to 10.',
       labelFormat: 'Output format',
-      hintFormat: 'Transparent backgrounds need png or webp; compression applies to jpeg and webp.',
+      hintFormat: 'png, jpeg, and webp always work. gif and svg need a GPT Image 2.6 model: both ignore compression, svg returns a single image with no source images, and gif uses the frames passed on the call. Transparent backgrounds need png or webp.',
       labelCompression: 'Compression',
       labelBackground: 'Background',
       hintBackground: 'The default a call inherits when it names no background.',
       labelModeration: 'Moderation',
-      hintModeration: 'Ignored by the 2.5 family, which rejects the parameter.',
+      hintModeration: 'Only sent when low is chosen; auto is what the API assumes, so it stays off the wire.',
+      labelComplexity: 'Complexity',
+      hintComplexity: 'GPT Image 2.6 only: how much the model plans before it renders, independently of render quality. auto sends nothing and leaves the model default (high).',
+      labelSafetyIdentifier: 'Safety identifier',
+      hintSafetyIdentifier: 'A stable, hashed end-user id, at most 128 characters. GPT Image 2.6 prefers it over user and sends it only when filled in.',
       labelUser: 'User',
-      hintUser: 'Optional end-user identifier the provider receives with each request.',
+      hintUser: 'Deprecated by the Images API. Kept for older gateways; a safety identifier wins when both are set.',
       labelOutputDir: 'Output directory',
       hintOutputDir: 'Where images are written when location is not passed. Empty uses the session workspace, then the plugin folder as a last resort.',
       outputDirPlaceholder: 'leave empty for the session workspace',
@@ -120,7 +131,8 @@ window.__ModuleLoader__.load({
       labelCompatibility: 'Request fields',
       toggleModeration: 'Send moderation',
       toggleCompression: 'Send output_compression',
-      hintCompatibility: 'Turn a field off when the model behind this endpoint rejects it. The 2.5 family always drops moderation.',
+      toggleComplexity: 'Send complexity',
+      hintCompatibility: 'Turn a field off when the model behind this endpoint rejects it. Older GPT Image models refuse complexity, gif, svg, and markup; moderation stays off unless low is chosen.',
       save: 'Save',
       saving: 'Saving...',
       reload: 'Reload',
@@ -140,12 +152,17 @@ window.__ModuleLoader__.load({
       expandParams: 'Parameters',
       paramResolution: 'Size',
       paramQuality: 'Quality',
+      paramFormat: 'Format',
+      paramComplexity: 'Complexity',
       paramCount: 'Count',
       paramBackground: 'Background',
+      paramFrames: 'Frames',
+      paramFrameDuration: 'Frame duration',
       paramLocation: 'Location',
       paramFiles: 'Files written',
       paramImages: 'Source images',
       paramMask: 'Mask',
+      paramMarkup: 'Markup',
       imageAlt: 'generated image',
       cardFailed: 'This card could not be drawn',
     };
@@ -155,7 +172,7 @@ window.__ModuleLoader__.load({
       title: '图片生成',
       subtitle: '调用发往哪里，以及没有自带参数时用什么。模型和端点决定调用能不能成功；下面的每一项默认值，只在调用省略了对应参数时生效。',
       labelModel: '模型',
-      hintModel: '按这个端点自己的叫法填模型 id。快捷选项覆盖 GPT Image 2.5 和 2 两个系列；网关还有别的模型，直接输入即可。',
+      hintModel: '按这个端点自己的叫法填模型 id。快捷选项覆盖 GPT Image 2.6、2.5、2 三个系列；网关还有别的模型，直接输入即可。',
       labelApiUrl: 'API 地址',
       hintApiUrl: '兼容 OpenAI 的接口基地址，会在后面拼接 /images/generations。',
       labelApiKey: 'API 密钥',
@@ -178,14 +195,18 @@ window.__ModuleLoader__.load({
       labelCount: '数量',
       hintCount: '调用未提供数量时使用。接口允许 1 到 10。',
       labelFormat: '输出格式',
-      hintFormat: '透明背景需要 png 或 webp；压缩率对 jpeg 和 webp 生效。',
+      hintFormat: 'png、jpeg、webp 一直可用。gif 和 svg 需要 GPT Image 2.6：两者都不走压缩，svg 只出单图且不能带源图，gif 用调用里传的帧参数。透明背景需要 png 或 webp。',
       labelCompression: '压缩率',
       labelBackground: '背景',
       hintBackground: '调用未指定背景时继承的默认值。',
       labelModeration: '内容审查',
-      hintModeration: '2.5 系列会忽略并拒绝该参数。',
+      hintModeration: '只有选了 low 才会发送；auto 是接口默认值，所以不进请求体。',
+      labelComplexity: '构图复杂度',
+      hintComplexity: '仅 GPT Image 2.6：模型渲染前花多少时间规划，和画质是两回事。auto 不发送，沿用模型自己的默认（high）。',
+      labelSafetyIdentifier: '安全标识',
+      hintSafetyIdentifier: '稳定的终端用户标识，建议先做哈希，最长 128 字符。GPT Image 2.6 优先用它取代 user，只有填写时才发送。',
       labelUser: '用户标识',
-      hintUser: '可选的终端用户标识，随每次请求发给服务端。',
+      hintUser: '图片接口已弃用该字段，这里保留给老网关；同时填写安全标识时以安全标识为准。',
       labelOutputDir: '输出目录',
       hintOutputDir: '调用没传 location 时，图片写到这里。留空则优先会话工作区，最后才用插件包内目录。',
       outputDirPlaceholder: '留空使用会话工作区',
@@ -209,7 +230,8 @@ window.__ModuleLoader__.load({
       labelCompatibility: '请求字段',
       toggleModeration: '发送 moderation',
       toggleCompression: '发送 output_compression',
-      hintCompatibility: '如果这个端点背后的模型不接受某个字段，就在这里关掉。2.5 系列始终不发 moderation。',
+      toggleComplexity: '发送 complexity',
+      hintCompatibility: '如果这个端点背后的模型不接受某个字段，就在这里关掉。老版 GPT Image 不接受 complexity、gif、svg 和 markup；moderation 只有选了 low 才会发送。',
       save: '保存',
       saving: '保存中...',
       reload: '重新读取',
@@ -229,12 +251,17 @@ window.__ModuleLoader__.load({
       expandParams: '参数',
       paramResolution: '尺寸',
       paramQuality: '画质',
+      paramFormat: '格式',
+      paramComplexity: '复杂度',
       paramCount: '张数',
       paramBackground: '背景',
+      paramFrames: '帧数',
+      paramFrameDuration: '帧间隔',
       paramLocation: '位置',
       paramFiles: '写盘文件',
       paramImages: '源图',
       paramMask: '蒙版',
+      paramMarkup: '标注图',
       imageAlt: '生成的图片',
       cardFailed: '这张卡片渲染失败',
     };
@@ -446,6 +473,8 @@ window.__ModuleLoader__.load({
         outputCompression: asNumber(raw?.outputCompression, 100),
         background: typeof raw?.background === 'string' ? raw.background : 'auto',
         moderation: typeof raw?.moderation === 'string' ? raw.moderation : 'auto',
+        complexity: typeof raw?.complexity === 'string' ? raw.complexity : 'auto',
+        safetyIdentifier: typeof raw?.safetyIdentifier === 'string' ? raw.safetyIdentifier : '',
         user: typeof raw?.user === 'string' ? raw.user : '',
         outputDir: typeof raw?.outputDir === 'string' ? raw.outputDir : '',
         fileNameFormat: typeof raw?.fileNameFormat === 'string' ? raw.fileNameFormat : '{time}-{prompt}',
@@ -454,6 +483,7 @@ window.__ModuleLoader__.load({
         maxEdge: asNumber(raw?.maxEdge, 3840),
         sendsModeration: raw?.sendsModeration !== false,
         sendsOutputCompression: raw?.sendsOutputCompression !== false,
+        sendsComplexity: raw?.sendsComplexity !== false,
       };
     }
 
@@ -590,7 +620,7 @@ window.__ModuleLoader__.load({
           return h('div', { style: { fontSize: 13, color: TOKENS.danger } }, state.message);
         }
 
-        const compressionLocked = form.outputFormat === 'png';
+        const compressionLocked = form.outputFormat !== 'jpeg' && form.outputFormat !== 'webp';
 
         return h(
           'div',
@@ -705,6 +735,18 @@ window.__ModuleLoader__.load({
 
           h(
             Row,
+            { label: t('labelComplexity'), hint: t('hintComplexity') },
+            h(SelectField, { value: form.complexity, options: COMPLEXITIES, onChange: patch('complexity') }),
+          ),
+
+          h(
+            Row,
+            { label: t('labelSafetyIdentifier'), hint: t('hintSafetyIdentifier') },
+            h(TextField, { value: form.safetyIdentifier, placeholder: 'user-1234', onChange: patch('safetyIdentifier') }),
+          ),
+
+          h(
+            Row,
             { label: t('labelUser'), hint: t('hintUser') },
             h(TextField, { value: form.user, onChange: patch('user') }),
           ),
@@ -810,6 +852,11 @@ window.__ModuleLoader__.load({
               value: form.sendsOutputCompression,
               onChange: patch('sendsOutputCompression'),
             }),
+            h(CheckField, {
+              label: t('toggleComplexity'),
+              value: form.sendsComplexity,
+              onChange: patch('sendsComplexity'),
+            }),
           ),
 
           h(
@@ -914,7 +961,7 @@ window.__ModuleLoader__.load({
     function parsePartialArgs(raw) {
       if (typeof raw !== 'string' || raw.length === 0) return null;
       const salvaged = {};
-      for (const field of ['prompt', 'resolution', 'quality', 'background', 'location']) {
+      for (const field of ['prompt', 'resolution', 'quality', 'format', 'complexity', 'background', 'location']) {
         const pattern = new RegExp(String.raw`"` + field + String.raw`"\s*:\s*"((?:[^"\\]|\\.)*)"?`);
         const match = pattern.exec(raw);
         if (!match) continue;
@@ -1105,11 +1152,16 @@ window.__ModuleLoader__.load({
       if (hasArgs) {
         add('paramResolution', args.resolution ?? 'auto');
         add('paramQuality', args.quality);
+        add('paramFormat', args.format);
+        add('paramComplexity', args.complexity);
         add('paramCount', args.count);
         add('paramBackground', args.background);
+        add('paramFrames', args.frames);
+        add('paramFrameDuration', args.frameDurationMs === undefined ? undefined : `${args.frameDurationMs} ms`);
         add('paramLocation', args.location);
         if (Array.isArray(args.images)) add('paramImages', args.images.length);
         add('paramMask', args.mask);
+        add('paramMarkup', args.markup);
       }
 
       if (images && images.length > 0) add('paramFiles', images.length);
