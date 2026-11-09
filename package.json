@@ -34,8 +34,8 @@
   ],
   "dependencies": {},
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@deepseek-ai/schemastery": "~3.19.0"
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.18.5 || ~3.19.0"
   },
   "scripts": {
     "check": "node checks/all.mjs"
