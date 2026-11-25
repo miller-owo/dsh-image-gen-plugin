@@ -1030,7 +1030,7 @@ await check('an illegal default size fails the call with the reason, not silentl
   if (!message.includes('2880x2880')) throw new Error('the message does not name the largest workable square');
 });
 
-await check('the manifest only names packages this DSH release actually ships', async () => {
+await check('the manifest only names packages and versions this DSH release actually ships', async () => {
   // Measured defect this covers: 0.2.1-rc.2 dropped @deepseek-ai/dsh-client-ui-slots, and the
   // manifest still injected it, so the Client half could not load. A peer pin also froze the
   // plugin out of the release that moved those packages.
@@ -1066,6 +1066,18 @@ await check('the manifest only names packages this DSH release actually ships', 
   // failure as a wrong module id: the card never gets a renderer.
   for (const name of manifest.dsh?.client?.inject ?? []) {
     if (!installed(name)) throw new Error(`dsh.client.inject names ${name}, which this DSH does not ship`);
+  }
+
+  // The Host enforces `engines.dsh` alone when it is declared, reading the running version from
+  // dsh-app-boot, and skips a profile bundle that fails it: a stale gate is a missing tool, not a
+  // warning. Check the same field the same way the Host does, prereleases included.
+  const gate = manifest.engines?.dsh;
+  if (gate !== undefined) {
+    if (typeof gate !== 'string' || gate.trim() === '') throw new Error('engines.dsh must be a non-empty string');
+    const running = installed('@deepseek-ai/dsh-app-boot')?.version;
+    if (running !== undefined && semver && !semver.satisfies(running, gate, { includePrerelease: true })) {
+      throw new Error(`engines.dsh ${gate} does not admit the running dsh ${running}`);
+    }
   }
 });
 

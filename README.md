@@ -277,6 +277,17 @@ dsh-image-gen-plugin/
 
 ## 更新记录
 
+### 1.2.2
+
+- **修复 DSH 兼容性判定**：兼容范围改成 `>=0.2.1-rc.2 <=0.2.2` 区间，不再逐个枚举精确版本，所以 `0.2.2-rc.5`（以及 `0.2.2` 这一行后续的预发布与正式版）能直接装上，`0.2.3` 起仍然拒绝。
+- 兼容声明同时写进 `engines.dsh`（Host 只认这个字段）和 `@deepseek-ai/dsh-tools` 的 peer 区间（peer 名还负责把裸包名路由到宿主那一份），两边保持一致。
+- 复核了 0.2.2-rc.5 上实际用到的接口：`defineTool`、`webServer.register`、`settings.section`、`tool.call.toolview`、`exec.agent.session.header.cwd`、locale 与 settings remote 都还在；插件早先依赖的 `toolCallArgumentsPartial` 流式 hook 在 0.2.2-rc.5 的包里已经找不到，卡片按既有兜底改读 `block.argsRaw`，生成中的提示词照常显示。四套自检直接对着本机 0.2.2-rc.5 全绿。
+- `checks/host.mjs` 增加 `engines.dsh` 与当前 DSH 运行时版本的一致性断言；此前只校验 peer。
+
+### 1.2.1
+
+- 支持 DSH 0.2.1-rc.5 与 0.2.2-rc.1；peer 依赖按精确版本逐个列举，`0.2.2-rc.5` 因此被 Host 判定为不兼容并跳过。
+
 ### 1.2.0
 
 - **支持 GPT Image 2.6**：模型快捷选项加入 `gpt-image-2.6-flare` / `gpt-image-2.6-sunburst`，默认模型跟着升级到 2.6-flare。
@@ -317,6 +328,17 @@ dsh-image-gen-plugin/
 ```powershell
 dsh plugin --profile web add "D:\MyProject\deepseek-image-generation\dsh-image-gen-plugin"
 ```
+
+#### 版本要求为什么写成区间
+
+`1.2.2` 之前 peer 里逐个列精确版本（`0.2.1-rc.2 || 0.2.1-rc.5 || 0.2.2-rc.1`），每出一个 rc 就得发一版，漏掉一个的代价不是警告而是**整包消失**：Host 引导时用 `evaluatePluginCompatibility` 检查每个 profile bundle，不满足就跳过它，症状是工具和设置页一起不见。
+
+现在两处都写成 `>=0.2.1-rc.2 <=0.2.2`：
+
+- `engines.dsh` 是 Host 唯一认的兼容字段；声明了它，`@deepseek-ai/dsh-*` 的 peer 就不再参与兼容判定。判定用 `semver.satisfies(runtime, range, { includePrerelease: true })`，所以 `<=0.2.2` 覆盖 `0.2.2-rc.5` 这类预发布和 `0.2.2` 正式版，而 `0.2.3-alpha.2`（比 `0.2.2` 大）会被拒绝。
+- peer 区间保持同样的写法：peer 的**名字**是裸包名路由表（`readPeerNames` 只读键，不读值），值是一份给人看的同义声明。
+
+升级 DSH 小版本时只改这两处区间，不用再列；`checks/host.mjs` 会把两边都对一遍当前装着的 DSH。
 
 ### 客户端插件的服务注入规则
 
